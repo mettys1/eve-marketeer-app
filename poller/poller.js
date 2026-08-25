@@ -211,19 +211,31 @@ async function rankByVolume(typeIds, historyDays, concurrency) {
   return ranked;
 }
 
-function weightedAvgTopFraction(orders, side, fraction = 0.05) {
+// Historically this weight-averaged price across the top 5% of order-book *volume* on each
+// side, meant to be more robust than a bare top-of-book price. In practice it backfired badly:
+// EVE's raw-material/moon-good markets (Promethium, Strontium Clathrates, compressed gas/ore,
+// ...) regularly carry a handful of enormous standing "floor" buy orders from industrial buyers
+// — bulk bids sitting far below the real market, sometimes 10-50x a day's actual traded volume
+// in size. Once even one such order falls inside the 5%-of-volume window, it swamps the weighted
+// average and drags the reported buy price (and therefore the margin) way down from what you'd
+// actually pay to be competitive. Confirmed against real numbers 2026-08-25: Promethium showed
+// 28.6k here vs. an actual best buy order of 51.0k in-game; Strontium Clathrates showed 2.1k vs.
+// an actual 3.95k. Both had a handful of orders holding order-of-magnitude more volume than a
+// full day's trade — the floor-order pattern, not noise.
+//
+// Fix: just take the top-of-book price — the single best standing order on each side. That's
+// exactly the number the game client shows you under "Market Buy/Sell", it's what you actually
+// have to beat to be competitive, and it can't be dragged around by a giant order sitting deeper
+// in the book. The one tradeoff is more sensitivity to a single one-off/troll order at the very
+// top — acceptable, since that's rare and easy to eyeball, versus the floor-order problem, which
+// was systemic across this item category.
+function topOfBook(orders, side) {
   if (!orders.length) return null;
-  const sorted = [...orders].sort((a, b) => side === 'buy' ? b.price - a.price : a.price - b.price);
-  const totalVol = sorted.reduce((s, o) => s + o.volume_remain, 0);
-  const targetVol = Math.max(totalVol * fraction, sorted[0].volume_remain);
-  let acc = 0, weightedSum = 0;
-  for (const o of sorted) {
-    const take = Math.min(o.volume_remain, targetVol - acc);
-    if (take <= 0) break;
-    weightedSum += o.price * take;
-    acc += take;
-  }
-  return acc > 0 ? weightedSum / acc : sorted[0].price;
+  const best = orders.reduce((b, o) => {
+    if (!b) return o;
+    return side === 'buy' ? (o.price > b.price ? o : b) : (o.price < b.price ? o : b);
+  }, null);
+  return best ? best.price : null;
 }
 
 function summarize(orders, stationFilter) {
@@ -235,8 +247,8 @@ function summarize(orders, stationFilter) {
     sellOrders: sells.length,
     buyVolume: buys.reduce((s, o) => s + o.volume_remain, 0),
     sellVolume: sells.reduce((s, o) => s + o.volume_remain, 0),
-    buyAvg5: weightedAvgTopFraction(buys, 'buy'),
-    sellAvg5: weightedAvgTopFraction(sells, 'sell'),
+    buyAvg5: topOfBook(buys, 'buy'),
+    sellAvg5: topOfBook(sells, 'sell'),
   };
 }
 

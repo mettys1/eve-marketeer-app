@@ -25,6 +25,8 @@ SCHEDULER_JOB="eve-jita-poller-trigger"
 SCHEDULE_CRON="17 6 * * *"               # daily 06:17 — change as you like (5-field cron, UTC by default; add --time-zone to gcloud scheduler jobs create if you want local time)
 SETUP_SCHEDULER="${SETUP_SCHEDULER:-true}"   # set to "false" (env var, not here) to skip Steps 11-12
                                               # and stay manual-only: SETUP_SCHEDULER=false bash deploy.sh
+BILLING_ACCOUNT_ID="012A7C-D17981-530577"    # fixed to your "Matej" billing account — no more
+                                              # interactive prompt on every re-run
 
 # ============================================================================
 # STEP 0 — MANUAL: create the project + enable billing.
@@ -41,9 +43,6 @@ gcloud projects create "$PROJECT_ID" --name="EVE Jita Scanner" \
   || echo "Project already exists, continuing..."
 
 echo "== Step 2: link billing =="
-echo "List your billing accounts:"
-gcloud billing accounts list
-read -p "Paste the billing account ID (format XXXXXX-XXXXXX-XXXXXX): " BILLING_ACCOUNT_ID
 gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT_ID"
 
 echo "== Step 3: set active project =="
