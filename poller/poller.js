@@ -2,43 +2,75 @@
 /**
  * eve-jita-poller — Cloud Run Job.
  *
- * Scans ESI market data for the watchlist (same items/logic as the local esi-scan.js script)
- * and writes results to BigQuery instead of a local JSON file. Meant to run on a Cloud Scheduler
+ * Scans ESI market data and writes results to BigQuery. Meant to run on a Cloud Scheduler
  * trigger, but `node poller.js` also works standalone from any machine with:
  *   - Application Default Credentials set up (`gcloud auth application-default login`), or
  *   - running inside GCP with a service account attached (Cloud Run Job's normal mode)
  * and the env vars below set.
  *
+ * Item universe (ITEM_MODE):
+ *   "top_volume" (default) — fetches every type_id currently trading in the region
+ *     (/markets/{region}/types/), ranks all of them by average daily trade volume over the
+ *     last HISTORY_DAYS days (one ESI history call per type_id — this is the expensive pass),
+ *     and keeps the top TOP_N_ITEMS. This is what actually runs on the schedule now: broad,
+ *     real-liquidity-based coverage instead of a hand-picked list.
+ *   "watchlist" — falls back to the original hand-picked WATCHLIST (+ CANDIDATES_PRICIER if
+ *     SCAN_ALL=true). Kept as an escape hatch: cheap, fast, useful if the region types/ranking
+ *     pass ever misbehaves or you just want the old fixed 52/84-item behavior back.
+ *
  * Env vars:
  *   GCP_PROJECT_ID          (required) — BigQuery project to write into
  *   BQ_DATASET              (default: eve_jita_scanner)
- *   SCAN_ALL                (default: "false") — set to "true" to also scan the 32
- *                            pricier-ships/minerals candidates
- *   HISTORY_DAYS            (default: 14) — turnover lookback window
+ *   ITEM_MODE               (default: "top_volume") — "top_volume" | "watchlist"
+ *   TOP_N_ITEMS             (default: 750) — only used when ITEM_MODE=top_volume
+ *   SCAN_ALL                (default: "false") — only used when ITEM_MODE=watchlist; set "true"
+ *                            to also scan the 32 pricier-ships/minerals candidates
+ *   HISTORY_DAYS            (default: 14) — turnover lookback window (also the ranking window
+ *                            for top_volume mode)
  *   WRITE_RAW_ORDERS        (default: "true") — set "false" to skip the (larger) raw-orders table
+ *   RANK_CONCURRENCY        (default: 10) — concurrent ESI requests during the history-ranking
+ *                            pass (top_volume mode only — this pass touches every tradeable
+ *                            type_id in the region, easily several thousand, so it needs to be
+ *                            concurrent or the job runs for ages)
+ *   SCAN_CONCURRENCY        (default: 6) — concurrent ESI requests while fetching full order
+ *                            books for the kept items (heavier per-request than history, so a
+ *                            lower concurrency than the ranking pass)
+ *
+ * A top_volume run touches thousands of type_ids just to rank them, so it takes a lot longer
+ * than the old fixed-watchlist run (minutes, not seconds) — make sure the Cloud Run Job's
+ * --task-timeout is generous (deploy.sh sets 3600s / 1h) and --memory is bumped (deploy.sh sets
+ * 1Gi) to hold the larger in-memory row arrays before the BigQuery write.
  */
 
 const { BigQuery } = require('@google-cloud/bigquery');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const REGION_ID = 10000002; // The Forge
 const JITA_STATION_ID = 60003760;
 const ESI_BASE = 'https://esi.evetech.net/latest';
 const BROKER = 0.01382;
 const TAX = 0.03375;
-const MAX_PAGES = 50;
+const MAX_PAGES = 50; // safety cap on paginated order-book fetches for a single item
+const MAX_TYPE_PAGES = 50; // safety cap on paginated /markets/{region}/types/ fetch
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID;
 const DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
+const ITEM_MODE = (process.env.ITEM_MODE || 'top_volume').toLowerCase();
+const TOP_N_ITEMS = Number(process.env.TOP_N_ITEMS) || 750;
 const SCAN_ALL = (process.env.SCAN_ALL || 'false').toLowerCase() === 'true';
 const HISTORY_DAYS = Number(process.env.HISTORY_DAYS) || 14;
 const WRITE_RAW_ORDERS = (process.env.WRITE_RAW_ORDERS || 'true').toLowerCase() !== 'false';
+const RANK_CONCURRENCY = Number(process.env.RANK_CONCURRENCY) || 10;
+const SCAN_CONCURRENCY = Number(process.env.SCAN_CONCURRENCY) || 6;
 
 if (!PROJECT_ID) {
   console.error('GCP_PROJECT_ID env var is required.');
   process.exit(1);
 }
 
-// ---- Watchlist (kept in sync with esi-scan.js / SKILL.md — update both if you add items) ----
+// ---- Fallback watchlist for ITEM_MODE=watchlist (kept in sync with esi-scan.js / SKILL.md) ----
 const WATCHLIST = {
   'Medium Shield Booster II': 10850, 'Damage Control II': 2048, 'Gyrostabilizer II': 519,
   '1MN Afterburner II': 438, '10MN Afterburner II': 12058, 'Warp Scrambler II': 448,
@@ -86,6 +118,60 @@ async function esiGet(url, attempt = 1) {
   return { data: await res.json(), pages: Number(res.headers.get('x-pages')) || 1 };
 }
 
+// Runs fn(item, index) over items with at most `limit` in flight at once. Plain array-based
+// worker pool — no external deps, good enough for a few thousand items.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        results[i] = { __error: err };
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
+async function fetchAllRegionTypeIds() {
+  const first = await esiGet(`${ESI_BASE}/markets/${REGION_ID}/types/?datasource=tranquility`);
+  let ids = first.data;
+  const pages = Math.min(first.pages, MAX_TYPE_PAGES);
+  for (let p = 2; p <= pages; p++) {
+    await sleep(100);
+    const next = await esiGet(`${ESI_BASE}/markets/${REGION_ID}/types/?datasource=tranquility&page=${p}`);
+    ids = ids.concat(next.data);
+  }
+  return ids;
+}
+
+// ESI's /universe/names/ takes up to 1000 ids per POST and returns {id, name, category} — this
+// is the cheap way to get names for a few hundred/thousand type_ids without one call each.
+async function fetchNames(typeIds) {
+  const names = {};
+  const CHUNK = 1000;
+  for (let i = 0; i < typeIds.length; i += CHUNK) {
+    const chunk = typeIds.slice(i, i + CHUNK);
+    const res = await fetch(`${ESI_BASE}/universe/names/?datasource=tranquility`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'eve-jita-poller/1.0 (Cloud Run Job)' },
+      body: JSON.stringify(chunk),
+    });
+    if (!res.ok) throw new Error(`ESI ${res.status} on /universe/names/`);
+    const data = await res.json();
+    for (const item of data) {
+      if (item.category === 'inventory_type') names[item.id] = item.name;
+    }
+    if (i + CHUNK < typeIds.length) await sleep(100);
+  }
+  return names;
+}
+
 async function fetchAllOrders(typeId) {
   const first = await esiGet(`${ESI_BASE}/markets/${REGION_ID}/orders/?datasource=tranquility&order_type=all&type_id=${typeId}`);
   let orders = first.data;
@@ -103,6 +189,26 @@ async function fetchAllOrders(typeId) {
 async function fetchHistory(typeId) {
   const { data } = await esiGet(`${ESI_BASE}/markets/${REGION_ID}/history/?datasource=tranquility&type_id=${typeId}`);
   return data;
+}
+
+// Ranks every type_id in `typeIds` by avg daily volume over the last `historyDays` days.
+// Returns the sorted ranking plus a cache of the history responses already fetched, so the
+// scan pass below doesn't have to re-fetch history for items it's keeping.
+async function rankByVolume(typeIds, historyDays, concurrency) {
+  const historyCache = new Map();
+  let done = 0;
+  const results = await mapWithConcurrency(typeIds, concurrency, async (typeId) => {
+    const history = await fetchHistory(typeId);
+    const recent = history.slice(-historyDays);
+    const avgVol = recent.length ? recent.reduce((s, d) => s + d.volume, 0) / recent.length : 0;
+    historyCache.set(typeId, history);
+    done++;
+    if (done % 1000 === 0) console.log(`  ranking progress: ${done}/${typeIds.length}`);
+    return { typeId, avgVol };
+  });
+  const ranked = results.filter(r => r && !r.__error);
+  ranked.sort((a, b) => b.avgVol - a.avgVol);
+  return { ranked, historyCache };
 }
 
 function weightedAvgTopFraction(orders, side, fraction = 0.05) {
@@ -141,65 +247,77 @@ function marginPct(buyAvg5, sellAvg5) {
   return (sellNet - buyCost) / buyCost * 100;
 }
 
-async function scanItem(name, typeId) {
-  const [orders, history] = await Promise.all([fetchAllOrders(typeId), fetchHistory(typeId)]);
-  const region = summarize(orders, null);
-  const station = summarize(orders, JITA_STATION_ID);
-  const recentHistory = history.slice(-HISTORY_DAYS);
-  const avgDailyVolume = recentHistory.length
-    ? recentHistory.reduce((s, d) => s + d.volume, 0) / recentHistory.length
-    : null;
-  return { name, typeId, orders, history, region, station, avgDailyVolume };
+async function buildItemList() {
+  if (ITEM_MODE === 'watchlist') {
+    const items = { ...WATCHLIST, ...(SCAN_ALL ? CANDIDATES_PRICIER : {}) };
+    return { itemList: Object.entries(items).map(([name, typeId]) => ({ name, typeId })), historyCache: new Map() };
+  }
+
+  console.log(`Fetching full market type list for region ${REGION_ID}...`);
+  const allTypeIds = await fetchAllRegionTypeIds();
+  console.log(`Region has ${allTypeIds.length} types with active orders. Ranking by avg daily volume (last ${HISTORY_DAYS}d, concurrency ${RANK_CONCURRENCY})...`);
+  const { ranked, historyCache } = await rankByVolume(allTypeIds, HISTORY_DAYS, RANK_CONCURRENCY);
+  const top = ranked.slice(0, TOP_N_ITEMS).map(r => r.typeId);
+  console.log(`Looking up names for top ${top.length} items...`);
+  const names = await fetchNames(top);
+  const itemList = top.map(typeId => ({ name: names[typeId] || `type_${typeId}`, typeId }));
+  return { itemList, historyCache };
 }
 
 async function main() {
   const bq = new BigQuery({ projectId: PROJECT_ID });
-  const items = { ...WATCHLIST, ...(SCAN_ALL ? CANDIDATES_PRICIER : {}) };
-  const names = Object.keys(items);
   const scannedAt = new Date();
   const scanDate = scannedAt.toISOString().slice(0, 10);
 
-  console.log(`Scanning ${names.length} items (region ${REGION_ID}) at ${scannedAt.toISOString()}`);
+  const { itemList, historyCache } = await buildItemList();
+  console.log(`Scanning ${itemList.length} items (mode=${ITEM_MODE}, region ${REGION_ID}, concurrency ${SCAN_CONCURRENCY}) at ${scannedAt.toISOString()}`);
 
   const snapshotRows = [];
   const rawOrderRows = [];
   const historyRows = [];
 
-  let i = 0;
-  for (const name of names) {
-    i++;
-    process.stdout.write(`[${i}/${names.length}] ${name}... `);
+  await mapWithConcurrency(itemList, SCAN_CONCURRENCY, async ({ name, typeId }, idx) => {
+    const label = `[${idx + 1}/${itemList.length}] ${name}`;
     try {
-      const r = await scanItem(name, items[name]);
+      const orders = await fetchAllOrders(typeId);
+      const history = historyCache.get(typeId) || await fetchHistory(typeId);
+      const region = summarize(orders, null);
+      const station = summarize(orders, JITA_STATION_ID);
+      const recentHistory = history.slice(-HISTORY_DAYS);
+      const avgDailyVolume = recentHistory.length
+        ? recentHistory.reduce((s, d) => s + d.volume, 0) / recentHistory.length
+        : null;
+
       snapshotRows.push({
         scanned_at: scannedAt.toISOString(),
         scan_date: scanDate,
-        type_id: r.typeId,
-        item_name: r.name,
-        region_buy_orders: r.region.buyOrders,
-        region_sell_orders: r.region.sellOrders,
-        region_buy_volume: r.region.buyVolume,
-        region_sell_volume: r.region.sellVolume,
-        region_buy_avg5: r.region.buyAvg5,
-        region_sell_avg5: r.region.sellAvg5,
-        region_margin_pct: marginPct(r.region.buyAvg5, r.region.sellAvg5),
-        station_buy_orders: r.station.buyOrders,
-        station_sell_orders: r.station.sellOrders,
-        station_buy_volume: r.station.buyVolume,
-        station_sell_volume: r.station.sellVolume,
-        station_buy_avg5: r.station.buyAvg5,
-        station_sell_avg5: r.station.sellAvg5,
-        station_margin_pct: marginPct(r.station.buyAvg5, r.station.sellAvg5),
-        avg_daily_volume_14d: r.avgDailyVolume,
+        type_id: typeId,
+        item_name: name,
+        region_buy_orders: region.buyOrders,
+        region_sell_orders: region.sellOrders,
+        region_buy_volume: region.buyVolume,
+        region_sell_volume: region.sellVolume,
+        region_buy_avg5: region.buyAvg5,
+        region_sell_avg5: region.sellAvg5,
+        region_margin_pct: marginPct(region.buyAvg5, region.sellAvg5),
+        station_buy_orders: station.buyOrders,
+        station_sell_orders: station.sellOrders,
+        station_buy_volume: station.buyVolume,
+        station_sell_volume: station.sellVolume,
+        station_buy_avg5: station.buyAvg5,
+        station_sell_avg5: station.sellAvg5,
+        station_margin_pct: marginPct(station.buyAvg5, station.sellAvg5),
+        avg_daily_volume_14d: avgDailyVolume,
         error: null,
       });
+
       if (WRITE_RAW_ORDERS) {
-        for (const o of r.orders) {
+        for (const o of orders) {
           rawOrderRows.push({
             scanned_at: scannedAt.toISOString(),
             scan_date: scanDate,
-            type_id: r.typeId,
-            item_name: r.name,
+            type_id: typeId,
+            item_name: name,
             order_id: o.order_id,
             is_buy_order: o.is_buy_order,
             price: o.price,
@@ -213,10 +331,11 @@ async function main() {
           });
         }
       }
-      for (const h of r.history) {
+
+      for (const h of history) {
         historyRows.push({
-          type_id: r.typeId,
-          item_name: r.name,
+          type_id: typeId,
+          item_name: name,
           history_date: h.date,
           average: h.average,
           highest: h.highest,
@@ -226,16 +345,19 @@ async function main() {
           fetched_at: scannedAt.toISOString(),
         });
       }
-      console.log(`ok (station margin ${r.station.buyAvg5 && r.station.sellAvg5 ? marginPct(r.station.buyAvg5, r.station.sellAvg5).toFixed(1) + '%' : 'n/a'})`);
+
+      const marginTxt = station.buyAvg5 && station.sellAvg5 ? marginPct(station.buyAvg5, station.sellAvg5).toFixed(1) + '%' : 'n/a';
+      if ((idx + 1) % 50 === 0 || idx === itemList.length - 1) {
+        console.log(`${label}... ok (station margin ${marginTxt}) [${idx + 1}/${itemList.length} done]`);
+      }
     } catch (err) {
-      console.log(`FAILED: ${err.message}`);
+      console.log(`${label}... FAILED: ${err.message}`);
       snapshotRows.push({
         scanned_at: scannedAt.toISOString(), scan_date: scanDate,
-        type_id: items[name], item_name: name, error: String(err.message),
+        type_id: typeId, item_name: name, error: String(err.message),
       });
     }
-    await sleep(150);
-  }
+  });
 
   console.log(`\nWriting ${snapshotRows.length} snapshot rows, ${rawOrderRows.length} raw order rows, ${historyRows.length} history rows to BigQuery...`);
 
@@ -244,13 +366,23 @@ async function main() {
   if (WRITE_RAW_ORDERS && rawOrderRows.length) {
     await insertInBatches(dataset.table('market_orders_raw'), rawOrderRows);
   }
-  // market_history is a full-window replace each run (ESI always returns ~1yr), so load-and-truncate
-  // rather than stream-append, to avoid unbounded duplicate growth.
+  // market_history is a full-window replace each run (ESI always returns ~1yr per item), so
+  // load-and-truncate rather than stream-append, to avoid unbounded duplicate growth.
+  //
+  // Table.load() needs a local file path (or a GCS File object) as its source — it can't take a
+  // Buffer/string directly ("Source must be a File object"). So we write the NDJSON to a temp
+  // file in /tmp (writable in the Cloud Run container) and point .load() at that.
   if (historyRows.length) {
-    await dataset.table('market_history').load(Buffer.from(historyRows.map(r => JSON.stringify(r)).join('\n')), {
-      sourceFormat: 'NEWLINE_DELIMITED_JSON',
-      writeDisposition: 'WRITE_TRUNCATE',
-    });
+    const tmpFile = path.join(os.tmpdir(), `eve-history-${Date.now()}.jsonl`);
+    fs.writeFileSync(tmpFile, historyRows.map(r => JSON.stringify(r)).join('\n'));
+    try {
+      await dataset.table('market_history').load(tmpFile, {
+        sourceFormat: 'NEWLINE_DELIMITED_JSON',
+        writeDisposition: 'WRITE_TRUNCATE',
+      });
+    } finally {
+      fs.unlinkSync(tmpFile);
+    }
   }
 
   console.log('Done.');

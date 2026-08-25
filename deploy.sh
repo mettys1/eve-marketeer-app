@@ -98,20 +98,29 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${POLLER_SA_EMAIL}" --role="roles/bigquery.jobUser"
 
 echo "== Step 9: create the Cloud Run Job (or update it, if this is a re-run) =="
+# ITEM_MODE=top_volume scans every type_id trading in the region (thousands), ranks by real
+# volume, keeps the top TOP_N_ITEMS — see poller.js's header comment. That pass touches a lot
+# more of ESI than the old fixed watchlist, so: generous --task-timeout (1h), and --memory bumped
+# for the larger in-memory row arrays before the BigQuery write.
+JOB_ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},ITEM_MODE=top_volume,TOP_N_ITEMS=750,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6"
 gcloud run jobs create "$JOB_NAME" \
   --image="$IMAGE" \
   --region="$REGION" \
   --service-account="$POLLER_SA_EMAIL" \
-  --set-env-vars="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},SCAN_ALL=false,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true" \
+  --set-env-vars="$JOB_ENV_VARS" \
   --max-retries=1 \
-  --task-timeout=600 \
+  --task-timeout=3600 \
+  --memory=1Gi \
+  --cpu=1 \
   || gcloud run jobs update "$JOB_NAME" \
        --image="$IMAGE" \
        --region="$REGION" \
        --service-account="$POLLER_SA_EMAIL" \
-       --set-env-vars="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},SCAN_ALL=false,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true" \
+       --set-env-vars="$JOB_ENV_VARS" \
        --max-retries=1 \
-       --task-timeout=600
+       --task-timeout=3600 \
+       --memory=1Gi \
+       --cpu=1
 
 echo "== Step 10: test-run it once, watch it go =="
 gcloud run jobs execute "$JOB_NAME" --region="$REGION" --wait
