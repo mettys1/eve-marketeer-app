@@ -4,12 +4,7 @@ A scheduled Cloud Run Job that scans ESI directly (no Fuzzwork/EVE Tycoon) and w
 BigQuery: buy/sell orders, aggregated margins, and daily turnover history. Replaces the manual
 `node esi-scan.js` workflow with something that runs itself.
 
-**I can't deploy this for you** — I have no live GCP access from this session (no shell on your
-machine, and my own sandbox has no internet at all). Everything below is written and
-syntax-checked, but not run-tested against a real GCP project, because I have no way to do that.
-Treat the first run as a real first run — paste me any error and I'll fix the script, but don't
-expect it to be flawless end to end on the first try the way a human-tested deploy script would
-be.
+
 
 ## What's in here
 
