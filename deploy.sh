@@ -23,6 +23,8 @@ POLLER_SA="eve-jita-poller-sa"
 SCHEDULER_SA="eve-jita-scheduler-sa"
 SCHEDULER_JOB="eve-jita-poller-trigger"
 SCHEDULE_CRON="17 6 * * *"               # daily 06:17 — change as you like (5-field cron, UTC by default; add --time-zone to gcloud scheduler jobs create if you want local time)
+SETUP_SCHEDULER="${SETUP_SCHEDULER:-true}"   # set to "false" (env var, not here) to skip Steps 11-12
+                                              # and stay manual-only: SETUP_SCHEDULER=false bash deploy.sh
 
 # ============================================================================
 # STEP 0 — MANUAL: create the project + enable billing.
@@ -98,11 +100,14 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${POLLER_SA_EMAIL}" --role="roles/bigquery.jobUser"
 
 echo "== Step 9: create the Cloud Run Job (or update it, if this is a re-run) =="
-# ITEM_MODE=top_volume scans every type_id trading in the region (thousands), ranks by real
-# volume, keeps the top TOP_N_ITEMS — see poller.js's header comment. That pass touches a lot
-# more of ESI than the old fixed watchlist, so: generous --task-timeout (1h), and --memory bumped
-# for the larger in-memory row arrays before the BigQuery write.
-JOB_ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},ITEM_MODE=top_volume,TOP_N_ITEMS=750,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6"
+# ITEM_MODE=top_volume scans every type_id trading in the region (19k+ — Cloud Run's own first
+# run told us), ranks by real volume, keeps the top TOP_N_ITEMS — see poller.js's header comment.
+# --memory bumped to 2Gi after the first attempt OOM'd (was caching full history for all 19k
+# items during ranking, not just the aggregate — fixed in poller.js, but keeping the extra
+# headroom). NODE_OPTIONS caps V8's heap below the container limit, leaving room for non-heap
+# overhead (Node itself, native buffers) so we get a clean JS OOM instead of a raw SIGKILL if
+# something does grow unexpectedly.
+JOB_ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},ITEM_MODE=top_volume,TOP_N_ITEMS=750,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6,NODE_OPTIONS=--max-old-space-size=1536"
 gcloud run jobs create "$JOB_NAME" \
   --image="$IMAGE" \
   --region="$REGION" \
@@ -110,7 +115,7 @@ gcloud run jobs create "$JOB_NAME" \
   --set-env-vars="$JOB_ENV_VARS" \
   --max-retries=1 \
   --task-timeout=3600 \
-  --memory=1Gi \
+  --memory=2Gi \
   --cpu=1 \
   || gcloud run jobs update "$JOB_NAME" \
        --image="$IMAGE" \
@@ -119,29 +124,34 @@ gcloud run jobs create "$JOB_NAME" \
        --set-env-vars="$JOB_ENV_VARS" \
        --max-retries=1 \
        --task-timeout=3600 \
-       --memory=1Gi \
+       --memory=2Gi \
        --cpu=1
 
 echo "== Step 10: test-run it once, watch it go =="
 gcloud run jobs execute "$JOB_NAME" --region="$REGION" --wait
 
-echo "== Step 11: service account for Scheduler to invoke the job =="
-gcloud iam service-accounts create "$SCHEDULER_SA" --display-name="EVE Jita Scheduler" \
-  || echo "Service account already exists, continuing..."
-SCHEDULER_SA_EMAIL="${SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
-gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
-  --region="$REGION" \
-  --member="serviceAccount:${SCHEDULER_SA_EMAIL}" \
-  --role="roles/run.invoker"
+if [ "$SETUP_SCHEDULER" = "true" ]; then
+  echo "== Step 11: service account for Scheduler to invoke the job =="
+  gcloud iam service-accounts create "$SCHEDULER_SA" --display-name="EVE Jita Scheduler" \
+    || echo "Service account already exists, continuing..."
+  SCHEDULER_SA_EMAIL="${SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+  gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
+    --region="$REGION" \
+    --member="serviceAccount:${SCHEDULER_SA_EMAIL}" \
+    --role="roles/run.invoker"
 
-echo "== Step 12: create the Cloud Scheduler trigger =="
-gcloud scheduler jobs create http "$SCHEDULER_JOB" \
-  --location="$REGION" \
-  --schedule="$SCHEDULE_CRON" \
-  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-  --http-method=POST \
-  --oauth-service-account-email="$SCHEDULER_SA_EMAIL" \
-  || echo "Scheduler job already exists, continuing..."
+  echo "== Step 12: create the Cloud Scheduler trigger =="
+  gcloud scheduler jobs create http "$SCHEDULER_JOB" \
+    --location="$REGION" \
+    --schedule="$SCHEDULE_CRON" \
+    --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+    --http-method=POST \
+    --oauth-service-account-email="$SCHEDULER_SA_EMAIL" \
+    || echo "Scheduler job already exists, continuing..."
+else
+  echo "== Steps 11-12 skipped (SETUP_SCHEDULER=false) — no automatic daily run, manual-only for now =="
+  echo "When you're ready to automate: bash deploy.sh (SETUP_SCHEDULER defaults to true)"
+fi
 
 echo ""
 echo "Done. Project: $PROJECT_ID"

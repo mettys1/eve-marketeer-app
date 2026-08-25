@@ -192,23 +192,23 @@ async function fetchHistory(typeId) {
 }
 
 // Ranks every type_id in `typeIds` by avg daily volume over the last `historyDays` days.
-// Returns the sorted ranking plus a cache of the history responses already fetched, so the
-// scan pass below doesn't have to re-fetch history for items it's keeping.
+// Deliberately does NOT keep the full history payload per item — with 15-20k type_ids in the
+// region, holding a year of daily records for every single one in memory at once is what OOM'd
+// the container the first time around. Just keep the one aggregate number needed for sorting;
+// the scan pass below re-fetches full history for the (much smaller) kept set.
 async function rankByVolume(typeIds, historyDays, concurrency) {
-  const historyCache = new Map();
   let done = 0;
   const results = await mapWithConcurrency(typeIds, concurrency, async (typeId) => {
     const history = await fetchHistory(typeId);
     const recent = history.slice(-historyDays);
     const avgVol = recent.length ? recent.reduce((s, d) => s + d.volume, 0) / recent.length : 0;
-    historyCache.set(typeId, history);
     done++;
     if (done % 1000 === 0) console.log(`  ranking progress: ${done}/${typeIds.length}`);
     return { typeId, avgVol };
   });
   const ranked = results.filter(r => r && !r.__error);
   ranked.sort((a, b) => b.avgVol - a.avgVol);
-  return { ranked, historyCache };
+  return ranked;
 }
 
 function weightedAvgTopFraction(orders, side, fraction = 0.05) {
@@ -250,18 +250,17 @@ function marginPct(buyAvg5, sellAvg5) {
 async function buildItemList() {
   if (ITEM_MODE === 'watchlist') {
     const items = { ...WATCHLIST, ...(SCAN_ALL ? CANDIDATES_PRICIER : {}) };
-    return { itemList: Object.entries(items).map(([name, typeId]) => ({ name, typeId })), historyCache: new Map() };
+    return Object.entries(items).map(([name, typeId]) => ({ name, typeId }));
   }
 
   console.log(`Fetching full market type list for region ${REGION_ID}...`);
   const allTypeIds = await fetchAllRegionTypeIds();
   console.log(`Region has ${allTypeIds.length} types with active orders. Ranking by avg daily volume (last ${HISTORY_DAYS}d, concurrency ${RANK_CONCURRENCY})...`);
-  const { ranked, historyCache } = await rankByVolume(allTypeIds, HISTORY_DAYS, RANK_CONCURRENCY);
+  const ranked = await rankByVolume(allTypeIds, HISTORY_DAYS, RANK_CONCURRENCY);
   const top = ranked.slice(0, TOP_N_ITEMS).map(r => r.typeId);
   console.log(`Looking up names for top ${top.length} items...`);
   const names = await fetchNames(top);
-  const itemList = top.map(typeId => ({ name: names[typeId] || `type_${typeId}`, typeId }));
-  return { itemList, historyCache };
+  return top.map(typeId => ({ name: names[typeId] || `type_${typeId}`, typeId }));
 }
 
 async function main() {
@@ -269,7 +268,7 @@ async function main() {
   const scannedAt = new Date();
   const scanDate = scannedAt.toISOString().slice(0, 10);
 
-  const { itemList, historyCache } = await buildItemList();
+  const itemList = await buildItemList();
   console.log(`Scanning ${itemList.length} items (mode=${ITEM_MODE}, region ${REGION_ID}, concurrency ${SCAN_CONCURRENCY}) at ${scannedAt.toISOString()}`);
 
   const snapshotRows = [];
@@ -279,8 +278,7 @@ async function main() {
   await mapWithConcurrency(itemList, SCAN_CONCURRENCY, async ({ name, typeId }, idx) => {
     const label = `[${idx + 1}/${itemList.length}] ${name}`;
     try {
-      const orders = await fetchAllOrders(typeId);
-      const history = historyCache.get(typeId) || await fetchHistory(typeId);
+      const [orders, history] = await Promise.all([fetchAllOrders(typeId), fetchHistory(typeId)]);
       const region = summarize(orders, null);
       const station = summarize(orders, JITA_STATION_ID);
       const recentHistory = history.slice(-HISTORY_DAYS);
