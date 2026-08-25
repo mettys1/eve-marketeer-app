@@ -1,0 +1,17 @@
+{
+  "name": "eve-jita-poller",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloud Run Job: scans ESI market data for the Jita watchlist, writes to BigQuery.",
+  "main": "poller.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node poller.js"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
