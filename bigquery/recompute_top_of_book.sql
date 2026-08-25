@@ -17,7 +17,7 @@ station AS (
     AND r.location_id = 60003760  -- Jita IV - Moon 4 - Caldari Navy Assembly Plant
 ),
 best_buy AS (
-  SELECT type_id, ANY_VALUE(item_name) AS item_name, price AS buy_price
+  SELECT type_id, item_name, price AS buy_price
   FROM station
   WHERE is_buy_order
   QUALIFY ROW_NUMBER() OVER (PARTITION BY type_id ORDER BY price DESC) = 1
