@@ -91,6 +91,11 @@ async function main() {
   // dedupe with a MERGE instead of a plain insert, since re-running this job will
   // re-fetch overlapping recent history every time (ESI has no "since last pull" filter
   // for these endpoints).
+  // Explicit types for the ARRAY<STRUCT<...>> param — without this, the client infers
+  // each field's type from the JS values it happens to see (e.g. an integer-looking
+  // unit_price on one row vs. a decimal like 30.73 on another), and guesses wrong,
+  // which fails the whole query. Spelling out the STRUCT shape here matches the actual
+  // BigQuery column types in bigquery/schema.sql, so this can't happen.
   if (txRows.length > 0) {
     await bq.query({
       query: `
@@ -99,6 +104,22 @@ async function main() {
         ON T.transaction_id = S.transaction_id
         WHEN NOT MATCHED THEN INSERT ROW`,
       params: { rows: txRows },
+      types: {
+        rows: [{
+          pulled_at: 'TIMESTAMP',
+          transaction_id: 'INT64',
+          date: 'TIMESTAMP',
+          type_id: 'INT64',
+          item_name: 'STRING',
+          quantity: 'INT64',
+          unit_price: 'FLOAT64',
+          is_buy: 'BOOL',
+          is_personal: 'BOOL',
+          location_id: 'INT64',
+          client_id: 'INT64',
+          journal_ref_id: 'INT64',
+        }],
+      },
     });
   }
   if (journalRows.length > 0) {
@@ -109,6 +130,24 @@ async function main() {
         ON T.journal_id = S.journal_id
         WHEN NOT MATCHED THEN INSERT ROW`,
       params: { rows: journalRows },
+      types: {
+        rows: [{
+          pulled_at: 'TIMESTAMP',
+          journal_id: 'INT64',
+          date: 'TIMESTAMP',
+          ref_type: 'STRING',
+          amount: 'FLOAT64',
+          balance: 'FLOAT64',
+          description: 'STRING',
+          reason: 'STRING',
+          context_id: 'INT64',
+          context_id_type: 'STRING',
+          first_party_id: 'INT64',
+          second_party_id: 'INT64',
+          tax: 'FLOAT64',
+          tax_receiver_id: 'INT64',
+        }],
+      },
     });
   }
   console.log(`Merged ${txRows.length} transactions, ${journalRows.length} journal entries into BigQuery.`);
