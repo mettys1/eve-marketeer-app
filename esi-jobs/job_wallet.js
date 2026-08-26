@@ -96,61 +96,72 @@ async function main() {
   // unit_price on one row vs. a decimal like 30.73 on another), and guesses wrong,
   // which fails the whole query. Spelling out the STRUCT shape here matches the actual
   // BigQuery column types in bigquery/schema.sql, so this can't happen.
-  if (txRows.length > 0) {
-    await bq.query({
-      query: `
-        MERGE \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\` T
-        USING UNNEST(@rows) S
-        ON T.transaction_id = S.transaction_id
-        WHEN NOT MATCHED THEN INSERT ROW`,
-      params: { rows: txRows },
-      types: {
-        rows: [{
-          pulled_at: 'TIMESTAMP',
-          transaction_id: 'INT64',
-          date: 'TIMESTAMP',
-          type_id: 'INT64',
-          item_name: 'STRING',
-          quantity: 'INT64',
-          unit_price: 'FLOAT64',
-          is_buy: 'BOOL',
-          is_personal: 'BOOL',
-          location_id: 'INT64',
-          client_id: 'INT64',
-          journal_ref_id: 'INT64',
-        }],
-      },
-    });
+  // NOTE: `WHEN NOT MATCHED THEN INSERT ROW` looks like it should star-expand S's
+  // columns, but with a query-parameter-driven `USING UNNEST(@rows) S` it doesn't
+  // reliably do that — BigQuery threw "Inserted row has wrong column count; Has 1,
+  // expected 12", meaning it saw S as a single STRUCT value, not 12 named columns.
+  // Fix: spell out the INSERT column list and VALUES explicitly instead of ROW.
+  //
+  // Also batched (CHUNK rows per MERGE call) as a defensive measure against BigQuery's
+  // per-request size limits now that this pulls the character's full trade history.
+  const CHUNK = 2000;
+  function chunks(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
   }
-  if (journalRows.length > 0) {
-    await bq.query({
-      query: `
-        MERGE \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\` T
-        USING UNNEST(@rows) S
-        ON T.journal_id = S.journal_id
-        WHEN NOT MATCHED THEN INSERT ROW`,
-      params: { rows: journalRows },
-      types: {
-        rows: [{
-          pulled_at: 'TIMESTAMP',
-          journal_id: 'INT64',
-          date: 'TIMESTAMP',
-          ref_type: 'STRING',
-          amount: 'FLOAT64',
-          balance: 'FLOAT64',
-          description: 'STRING',
-          reason: 'STRING',
-          context_id: 'INT64',
-          context_id_type: 'STRING',
-          first_party_id: 'INT64',
-          second_party_id: 'INT64',
-          tax: 'FLOAT64',
-          tax_receiver_id: 'INT64',
-        }],
-      },
-    });
+
+  const TX_TYPES = {
+    pulled_at: 'TIMESTAMP', transaction_id: 'INT64', date: 'TIMESTAMP',
+    type_id: 'INT64', item_name: 'STRING', quantity: 'INT64', unit_price: 'FLOAT64',
+    is_buy: 'BOOL', is_personal: 'BOOL', location_id: 'INT64', client_id: 'INT64',
+    journal_ref_id: 'INT64',
+  };
+  const TX_COLS = Object.keys(TX_TYPES);
+  const TX_MERGE_SQL = `
+    MERGE \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\` T
+    USING UNNEST(@rows) S
+    ON T.transaction_id = S.transaction_id
+    WHEN NOT MATCHED THEN
+      INSERT (${TX_COLS.join(', ')})
+      VALUES (${TX_COLS.map((c) => `S.${c}`).join(', ')})`;
+
+  const JOURNAL_TYPES = {
+    pulled_at: 'TIMESTAMP', journal_id: 'INT64', date: 'TIMESTAMP', ref_type: 'STRING',
+    amount: 'FLOAT64', balance: 'FLOAT64', description: 'STRING', reason: 'STRING',
+    context_id: 'INT64', context_id_type: 'STRING', first_party_id: 'INT64',
+    second_party_id: 'INT64', tax: 'FLOAT64', tax_receiver_id: 'INT64',
+  };
+  const JOURNAL_COLS = Object.keys(JOURNAL_TYPES);
+  const JOURNAL_MERGE_SQL = `
+    MERGE \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\` T
+    USING UNNEST(@rows) S
+    ON T.journal_id = S.journal_id
+    WHEN NOT MATCHED THEN
+      INSERT (${JOURNAL_COLS.join(', ')})
+      VALUES (${JOURNAL_COLS.map((c) => `S.${c}`).join(', ')})`;
+
+  // Greppable prefix so a future failure's real message is easy to find in Cloud
+  // Logging without guessing at gcloud's textPayload formatting/truncation.
+  async function mergeChunked(label, sql, rows, types) {
+    let done = 0;
+    for (const batch of chunks(rows, CHUNK)) {
+      try {
+        await bq.query({ query: sql, params: { rows: batch }, types: { rows: [types] } });
+        done += batch.length;
+      } catch (err) {
+        console.error(`WALLET_JOB_ERROR[${label}]: batch of ${batch.length} rows failed (after ${done} succeeded).`);
+        console.error(`WALLET_JOB_ERROR[${label}] message: ${err && err.message}`);
+        if (err && err.errors) console.error(`WALLET_JOB_ERROR[${label}] errors: ${JSON.stringify(err.errors)}`);
+        throw err;
+      }
+    }
+    console.log(`Merged ${done} ${label} rows into BigQuery.`);
   }
-  console.log(`Merged ${txRows.length} transactions, ${journalRows.length} journal entries into BigQuery.`);
+
+  if (txRows.length > 0) await mergeChunked('wallet_transactions', TX_MERGE_SQL, txRows, TX_TYPES);
+  if (journalRows.length > 0) await mergeChunked('wallet_journal', JOURNAL_MERGE_SQL, journalRows, JOURNAL_TYPES);
+  console.log(`Done. ${txRows.length} transactions, ${journalRows.length} journal entries processed.`);
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });
