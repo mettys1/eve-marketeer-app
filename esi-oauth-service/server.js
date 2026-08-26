@@ -254,6 +254,50 @@ const REPORTS = {
       (t.total_sell_revenue - t.total_buy_spend - f.broker_fees - f.sales_tax - f.scc_surcharge)
         AS net_cash_pnl_approx
     FROM tx_totals t, fees f`,
+
+  // Added 2026-08-26 — Matej wants day-to-day tracking rather than one lifetime-to-date
+  // number, partly because trading_pnl_full_history mixes in escalation-loot sales
+  // (zero cost basis, inflates "profit" but isn't repeatable trading skill) alongside
+  // actual station trading. This doesn't separate loot from trades (no item-source flag
+  // exists in ESI's transaction data), but per-day granularity at least makes a loot
+  // windfall visible as a one-day spike instead of buried in a 26-day total.
+  trading_pnl_daily: `
+    WITH daily_tx AS (
+      SELECT DATE(date) AS day,
+        SUM(IF(is_buy, quantity * unit_price, 0)) AS buy_spend,
+        SUM(IF(NOT is_buy, quantity * unit_price, 0)) AS sell_revenue,
+        COUNTIF(is_buy) AS buy_count,
+        COUNTIF(NOT is_buy) AS sell_count
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\`
+      GROUP BY day
+    ),
+    daily_fees AS (
+      SELECT DATE(date) AS day,
+        SUM(IF(ref_type = 'brokers_fee', -amount, 0)) AS broker_fees,
+        SUM(IF(ref_type = 'transaction_tax', -amount, 0)) AS sales_tax,
+        SUM(IF(ref_type = 'market_provider_tax', -amount, 0)) AS scc_surcharge
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      GROUP BY day
+    ),
+    daily_balance AS (
+      SELECT day, balance FROM (
+        SELECT DATE(date) AS day, balance,
+          ROW_NUMBER() OVER (PARTITION BY DATE(date) ORDER BY date DESC) AS rn
+        FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      ) WHERE rn = 1
+    )
+    SELECT
+      t.day, t.buy_count, t.sell_count, t.buy_spend, t.sell_revenue,
+      IFNULL(f.broker_fees, 0) AS broker_fees, IFNULL(f.sales_tax, 0) AS sales_tax,
+      IFNULL(f.scc_surcharge, 0) AS scc_surcharge,
+      (t.sell_revenue - t.buy_spend - IFNULL(f.broker_fees, 0) - IFNULL(f.sales_tax, 0) - IFNULL(f.scc_surcharge, 0))
+        AS net_cash_pnl,
+      b.balance AS balance_eod
+    FROM daily_tx t
+    LEFT JOIN daily_fees f USING (day)
+    LEFT JOIN daily_balance b USING (day)
+    ORDER BY t.day DESC
+    LIMIT 30`,
 };
 
 async function handleReport(req, reqUrl, res) {
