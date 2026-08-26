@@ -213,6 +213,47 @@ const REPORTS = {
     WHERE date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
     GROUP BY ref_type
     ORDER BY gross_amount DESC`,
+
+  // Added 2026-08-26 after Matej correctly called out that netting wallet_journal's
+  // market_transaction amounts over an arbitrary short window (e.g. 7 days) isn't real
+  // profit — if that window happens to contain only sells and no buy fills (as the 7-day
+  // one did: market_transaction's gross_amount == net_amount there, meaning zero negative
+  // entries), the result is just gross sell revenue with the cost of goods sold entirely
+  // excluded. This uses wallet_transactions (which has full history now, not a rolling
+  // window) to total actual buy spend vs. sell revenue, netted against the matching fees
+  // from wallet_journal over the SAME date range.
+  //
+  // Caveat that still applies and can't be fixed without full inventory/lot accounting:
+  // this assumes ending inventory (unsold stock + ISK reserved in currently-open buy-order
+  // escrow that hasn't resulted in a fill yet) is ~zero. It isn't — Matej has real open
+  // buy and sell orders — so this is a cash-based approximation, not a true P&L. It's a
+  // much better one than the 7-day window, though, since it can't hit the "zero buys in
+  // the window" artifact once the history is long enough to contain both sides.
+  trading_pnl_full_history: `
+    WITH tx_totals AS (
+      SELECT
+        MIN(date) AS earliest, MAX(date) AS latest,
+        SUM(IF(is_buy, quantity * unit_price, 0)) AS total_buy_spend,
+        SUM(IF(NOT is_buy, quantity * unit_price, 0)) AS total_sell_revenue,
+        COUNTIF(is_buy) AS buy_tx_count,
+        COUNTIF(NOT is_buy) AS sell_tx_count
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\`
+    ),
+    fees AS (
+      SELECT
+        SUM(IF(ref_type = 'brokers_fee', -amount, 0)) AS broker_fees,
+        SUM(IF(ref_type = 'transaction_tax', -amount, 0)) AS sales_tax,
+        SUM(IF(ref_type = 'market_provider_tax', -amount, 0)) AS scc_surcharge
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`, tx_totals
+      WHERE date BETWEEN tx_totals.earliest AND tx_totals.latest
+    )
+    SELECT
+      t.earliest, t.latest, t.buy_tx_count, t.sell_tx_count,
+      t.total_buy_spend, t.total_sell_revenue,
+      f.broker_fees, f.sales_tax, f.scc_surcharge,
+      (t.total_sell_revenue - t.total_buy_spend - f.broker_fees - f.sales_tax - f.scc_surcharge)
+        AS net_cash_pnl_approx
+    FROM tx_totals t, fees f`,
 };
 
 async function handleReport(req, reqUrl, res) {
