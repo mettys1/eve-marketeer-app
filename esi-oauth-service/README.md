@@ -40,23 +40,22 @@ must already be enabled on the app in the CCP portal — same requirement as bef
 
 ## Getting fresh data
 
-```
-gcloud run jobs execute esi-my-orders-poller --region=europe-west1 --project=eve-jita-scanner-21359 --wait
-gcloud run jobs execute esi-perimeter-poller --region=europe-west1 --project=eve-jita-scanner-21359 --wait
-```
-
-Both write straight to BigQuery (`eve_jita_scanner.my_orders` and
-`.perimeter_orders_raw` — schema in `bigquery/schema.sql`), same project as the daily
-Jita pipeline. No CSV lands anywhere automatically — pull what you want with `bq
-query`, the same way `refresh.sh` does for the main pipeline, e.g.:
+Standardized 2026-08-26 to the exact same shape as the main Jita pipeline's
+`refresh.sh` — one script per data source, each does "run the Cloud Run Job, then
+pull a ready-to-upload CSV out of BigQuery":
 
 ```
-bq query --use_legacy_sql=false --format=csv --max_rows=5000 \
-  'SELECT * EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn FROM `eve-jita-scanner-21359.eve_jita_scanner.my_orders`) WHERE rn = 1' \
-  > my_orders_latest.csv
+bash refresh_my_orders.sh     # -> my_orders_latest.csv (your own open orders)
+bash refresh_perimeter.sh     # -> perimeter_top_of_book.csv (Perimeter's full book,
+                               #    recomputed to top-of-book/margin the same way
+                               #    bigquery/recompute_top_of_book.sql does for Jita —
+                               #    see bigquery/recompute_perimeter_top_of_book.sql)
 ```
 
-then upload that CSV into the conversation with Claude, same as always.
+Upload either CSV into the conversation with Claude, same as `recompute_top_of_book.csv`
+always has been. Both write to BigQuery first (`eve_jita_scanner.my_orders` /
+`.perimeter_orders_raw` — schema in `bigquery/schema.sql`) so the raw history is kept
+regardless of whether you remember to upload the CSV that run.
 
 ## Manual-trigger only, on purpose
 

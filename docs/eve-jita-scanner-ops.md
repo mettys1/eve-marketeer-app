@@ -161,17 +161,30 @@ during token exchange — note EVE SSO rejects the request if `client_id` appear
 in the Authorization header AND the request body, hit this once, fixed by omitting it
 from the body whenever Basic Auth is used).
 
-**Status as of 2026-08-26: code written, not yet deployed/run by Matej.** Don't assume
-`esi-oauth-service` is live or that `my_orders`/`perimeter_orders_raw` have any rows
-yet — ask whether `deploy_esi.sh` has been run and the login link visited before
-relying on this data existing. To get fresh data once it's live:
+**Status as of 2026-08-26: deployed and working.** `deploy_esi.sh` ran successfully
+(project `eve-marketeer-app` vs `eve-jita-scanner-21359` mix-up along the way — after
+`gcloud auth login` in a fresh Cloud Shell session, the active project reset to a
+different one Matej has; `gcloud config set project eve-jita-scanner-21359` fixed it —
+if a `gcloud run jobs execute` ever says a job doesn't exist, check `gcloud config
+get-value project` first before assuming something wasn't deployed). Login completed,
+`bigquery/schema.sql` was re-run to actually create the `my_orders` /
+`perimeter_orders_raw` tables (a step easy to forget since `deploy_esi.sh` itself
+doesn't create them — only `poller`'s Cloud Run Job setup happens automatically).
+
+**Standardized the same day** to match the main Jita pipeline's shape exactly, per
+Matej ("tahame ceny na Perimetru přes ESI, Jitu tahame přímo — chtelo by to
+standardizovat"): added `bigquery/recompute_perimeter_top_of_book.sql` (same
+top-of-book/margin logic as `recompute_top_of_book.sql`, minus the `location_id`
+filter — `perimeter_orders_raw` is already single-structure — and minus
+`avg_daily_volume_14d`, no equivalent history table exists for Perimeter yet) and two
+refresh scripts mirroring `refresh.sh`:
 
 ```
-bq query --use_legacy_sql=false --format=csv --max_rows=5000 \
-  'SELECT * EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn FROM `eve-jita-scanner-21359.eve_jita_scanner.my_orders`) WHERE rn = 1' \
-  > my_orders_latest.csv
+bash refresh_my_orders.sh     # runs esi-my-orders-poller, pulls my_orders_latest.csv
+bash refresh_perimeter.sh     # runs esi-perimeter-poller, pulls perimeter_top_of_book.csv
 ```
-(upload that CSV into the conversation, same as `recompute_top_of_book.csv`).
+
+Upload either CSV into the conversation the same way as `recompute_top_of_book.csv`.
 
 ## Files in the repo
 
@@ -184,6 +197,9 @@ bq query --use_legacy_sql=false --format=csv --max_rows=5000 \
 | `refresh.sh` | One-command daily refresh: new scan + recompute, in one call. |
 | `reports/generate_reports.py` | Builds the `.xlsx` report + `.html` dashboard from a `recompute_top_of_book.csv`. |
 | `deploy_esi.sh` | One-time GCP bootstrap for the ESI login service + jobs (Firestore, Secret Manager, Cloud Run service + 2 jobs, IAM). Primary path — see ESI section above. |
+| `bigquery/recompute_perimeter_top_of_book.sql` | Perimeter equivalent of `recompute_top_of_book.sql` — same top-of-book/margin logic, sourced from `perimeter_orders_raw`. |
+| `refresh_my_orders.sh` | One-command refresh for Matej's own orders: run the job + pull `my_orders_latest.csv`. |
+| `refresh_perimeter.sh` | One-command refresh for Perimeter: run the job + pull `perimeter_top_of_book.csv`. |
 | `esi-oauth-service/server.js` | Cloud Run service: `/login` + `/callback` OAuth endpoints, writes the refresh token to Secret Manager. |
 | `esi-jobs/job_my_orders.js` | Cloud Run Job: pulls Matej's live open orders into BigQuery `my_orders`. |
 | `esi-jobs/job_perimeter.js` | Cloud Run Job: pulls the full Perimeter citadel order book into BigQuery `perimeter_orders_raw`. |
