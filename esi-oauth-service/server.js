@@ -37,7 +37,13 @@ const LOGIN_KEY = process.env.LOGIN_KEY || '';
 // should hit this" in sensitivity.
 const REPORT_KEY = process.env.REPORT_KEY || LOGIN_KEY;
 const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
-const SCOPES = 'esi-markets.read_character_orders.v1 esi-markets.structure_markets.v1';
+// esi-wallet.read_character_wallet.v1 added 2026-08-26 for wallet_transactions/journal
+// (esi-jobs/job_wallet.js) — real fill/fee history for staleness analysis, since
+// repricing resets an order's `issued` timestamp but never touches the ledger. Anyone
+// already logged in from before this needs to re-visit /login to pick up the new scope
+// (EVE SSO won't silently widen an existing grant) — also re-tick the matching
+// checkbox on the app in developers.eveonline.com if it's not already enabled there.
+const SCOPES = 'esi-markets.read_character_orders.v1 esi-markets.structure_markets.v1 esi-wallet.read_character_wallet.v1';
 const SSO_BASE = 'https://login.eveonline.com';
 const STATE_COLLECTION = 'oauth_pending';
 const STATE_TTL_MS = 10 * 60 * 1000; // PKCE flow should complete within 10 minutes

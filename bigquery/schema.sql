@@ -123,3 +123,43 @@ CLUSTER BY type_id, is_buy_order
 OPTIONS (
   partition_expiration_days = 90
 );
+
+-- Added 2026-08-26 alongside esi-wallet-poller — the real transaction/journal ledger,
+-- unlike `my_orders` (a snapshot of currently-open orders) this is permanent history
+-- that repricing never resets, so fill-velocity/staleness analysis should lean on this
+-- once there's a few days of data instead of the `issued` timestamp trick.
+CREATE TABLE IF NOT EXISTS `eve_jita_scanner.wallet_transactions` (
+  pulled_at TIMESTAMP NOT NULL,
+  transaction_id INT64 NOT NULL,
+  date TIMESTAMP NOT NULL,
+  type_id INT64,
+  item_name STRING,
+  quantity INT64,
+  unit_price FLOAT64,
+  is_buy BOOL,
+  is_personal BOOL,
+  location_id INT64,
+  client_id INT64,
+  journal_ref_id INT64
+)
+PARTITION BY DATE(date)
+CLUSTER BY type_id;
+
+CREATE TABLE IF NOT EXISTS `eve_jita_scanner.wallet_journal` (
+  pulled_at TIMESTAMP NOT NULL,
+  journal_id INT64 NOT NULL,
+  date TIMESTAMP NOT NULL,
+  ref_type STRING,
+  amount FLOAT64,
+  balance FLOAT64,
+  description STRING,
+  reason STRING,
+  context_id INT64,
+  context_id_type STRING,
+  first_party_id INT64,
+  second_party_id INT64,
+  tax FLOAT64,
+  tax_receiver_id INT64
+)
+PARTITION BY DATE(date)
+CLUSTER BY ref_type;

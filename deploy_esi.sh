@@ -145,10 +145,22 @@ gcloud run jobs create esi-perimeter-poller \
        --service-account="$JOBS_SA_EMAIL" --set-env-vars="$JOB_ENV_VARS" \
        --max-retries=1 --task-timeout=600
 
+gcloud run jobs create esi-wallet-poller \
+  --image="$JOBS_IMAGE" --command="node" --args="job_wallet.js" \
+  --region="$REGION" --project="$PROJECT_ID" \
+  --service-account="$JOBS_SA_EMAIL" --set-env-vars="$JOB_ENV_VARS" \
+  --max-retries=1 --task-timeout=600 \
+  || gcloud run jobs update esi-wallet-poller \
+       --image="$JOBS_IMAGE" --command="node" --args="job_wallet.js" \
+       --region="$REGION" --project="$PROJECT_ID" \
+       --service-account="$JOBS_SA_EMAIL" --set-env-vars="$JOB_ENV_VARS" \
+       --max-retries=1 --task-timeout=600
+
 echo ""
 echo "Done."
 echo "1. Set the Callback URL in CCP's app settings to ${SERVICE_URL}/callback (see above)."
 echo "2. Log in once: ${SERVICE_URL}/login?key=${LOGIN_KEY}"
 echo "3. Then any time: gcloud run jobs execute esi-my-orders-poller --region=$REGION"
 echo "               and gcloud run jobs execute esi-perimeter-poller --region=$REGION"
-echo "   Results land in BigQuery ${PROJECT_ID}.${BQ_DATASET}.my_orders / .perimeter_orders_raw"
+echo "               and gcloud run jobs execute esi-wallet-poller --region=$REGION"
+echo "   Results land in BigQuery ${PROJECT_ID}.${BQ_DATASET}.my_orders / .perimeter_orders_raw / .wallet_transactions / .wallet_journal"
