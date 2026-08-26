@@ -125,6 +125,94 @@ const REPORTS = {
     WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`)
     ORDER BY region_margin_pct DESC
     LIMIT 500`,
+
+  // Added 2026-08-26 right after esi-wallet-poller's first successful run — a quick
+  // sanity check that transactions/journal actually landed (row counts + date range)
+  // before building anything more elaborate (real fill-velocity vs. `issued`-based
+  // staleness) on top of these tables.
+  wallet_summary: `
+    SELECT
+      (SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\`) AS tx_count,
+      (SELECT MIN(date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\`) AS tx_earliest,
+      (SELECT MAX(date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_transactions\`) AS tx_latest,
+      (SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`) AS journal_count,
+      (SELECT MIN(date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`) AS journal_earliest,
+      (SELECT MAX(date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`) AS journal_latest`,
+
+  // Added 2026-08-26 — Matej asked: jsou-li vyděláváme, roste-li kapitál, kolik ISK
+  // proteklo od minulého refreshe. `balance` in wallet_journal is the running WALLET
+  // CASH balance after each entry — it does NOT include ISK currently locked as escrow
+  // in open buy orders, so pure balance deltas understate capital while buy orders are
+  // open. total_capital_estimate below adds back that escrow (from the latest my_orders
+  // snapshot) to correct for it; it does NOT add the market value of open sell listings
+  // (that ISK is still "yours" as inventory, just not cash — shown separately as
+  // listed_sell_value for context, not folded into the capital total to avoid
+  // double-counting cost basis already reflected in past buy transactions).
+  wallet_capital: `
+    WITH latest_balance AS (
+      SELECT balance AS current_balance, date AS as_of
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      ORDER BY date DESC LIMIT 1
+    ),
+    balance_24h_ago AS (
+      SELECT balance FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      WHERE date <= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+      ORDER BY date DESC LIMIT 1
+    ),
+    balance_7d_ago AS (
+      SELECT balance FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      WHERE date <= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+      ORDER BY date DESC LIMIT 1
+    ),
+    cashflow_24h AS (
+      SELECT
+        SUM(amount) AS net_cashflow,
+        SUM(ABS(amount)) AS gross_flow,
+        COUNT(*) AS entry_count
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      WHERE date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+    ),
+    cashflow_7d AS (
+      SELECT SUM(amount) AS net_cashflow, SUM(ABS(amount)) AS gross_flow
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+      WHERE date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+    ),
+    latest_orders AS (
+      SELECT * EXCEPT(rn) FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
+        FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
+      ) WHERE rn = 1
+    ),
+    escrow AS (
+      SELECT SUM(price * volume_remain) AS locked_in_buy_orders
+      FROM latest_orders WHERE is_buy_order
+    ),
+    sell_listings AS (
+      SELECT SUM(price * volume_remain) AS listed_sell_value
+      FROM latest_orders WHERE NOT is_buy_order
+    )
+    SELECT
+      lb.current_balance, lb.as_of,
+      b24.balance AS balance_24h_ago, lb.current_balance - b24.balance AS wallet_change_24h,
+      b7.balance AS balance_7d_ago, lb.current_balance - b7.balance AS wallet_change_7d,
+      c24.net_cashflow AS net_cashflow_24h, c24.gross_flow AS gross_flow_24h, c24.entry_count AS entries_24h,
+      c7.net_cashflow AS net_cashflow_7d, c7.gross_flow AS gross_flow_7d,
+      esc.locked_in_buy_orders, sl.listed_sell_value,
+      lb.current_balance + esc.locked_in_buy_orders AS total_capital_estimate,
+      (lb.current_balance + esc.locked_in_buy_orders)
+        - (b24.balance + esc.locked_in_buy_orders) AS capital_change_24h_approx
+    FROM latest_balance lb, balance_24h_ago b24, balance_7d_ago b7,
+         cashflow_24h c24, cashflow_7d c7, escrow esc, sell_listings sl`,
+
+  // Diagnostic companion to wallet_capital — groups raw cash flow by ESI's actual
+  // ref_type strings so the breakdown (fees vs. tax vs. trades vs. escrow moves) can be
+  // built with the real names instead of guessed ones.
+  wallet_breakdown_by_type: `
+    SELECT ref_type, COUNT(*) AS entries, SUM(amount) AS net_amount, SUM(ABS(amount)) AS gross_amount
+    FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
+    WHERE date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+    GROUP BY ref_type
+    ORDER BY gross_amount DESC`,
 };
 
 async function handleReport(req, reqUrl, res) {
