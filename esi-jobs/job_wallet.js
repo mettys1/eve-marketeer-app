@@ -54,11 +54,17 @@ async function main() {
 
   const bq = new BigQuery({ projectId: GCP_PROJECT_ID });
   const pulledAt = new Date().toISOString();
+  // For a TIMESTAMP field nested inside an ARRAY<STRUCT<...>> query parameter, the
+  // client's value-encoder for struct fields doesn't apply the same auto-conversion a
+  // top-level TIMESTAMP param gets — a raw ISO string silently comes through as NULL
+  // (hence "Required field pulled_at cannot be null" even though every row set it).
+  // Wrapping with bigquery.timestamp(...) forces the correct encoding either way.
+  const ts = (v) => (v == null ? null : bq.timestamp(v));
 
   const txRows = transactions.map((t) => ({
-    pulled_at: pulledAt,
+    pulled_at: ts(pulledAt),
     transaction_id: t.transaction_id,
-    date: t.date,
+    date: ts(t.date),
     type_id: t.type_id,
     item_name: typeNames[t.type_id] || null,
     quantity: t.quantity,
@@ -71,9 +77,9 @@ async function main() {
   }));
 
   const journalRows = journal.map((j) => ({
-    pulled_at: pulledAt,
+    pulled_at: ts(pulledAt),
     journal_id: j.id,
-    date: j.date,
+    date: ts(j.date),
     ref_type: j.ref_type,
     amount: j.amount != null ? j.amount : null,
     balance: j.balance != null ? j.balance : null,
