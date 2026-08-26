@@ -205,6 +205,8 @@ Upload either CSV into the conversation the same way as `recompute_top_of_book.c
 | `esi-jobs/job_my_orders.js` | Cloud Run Job: pulls Matej's live open orders into BigQuery `my_orders`. |
 | `esi-jobs/job_perimeter.js` | Cloud Run Job: pulls the full Perimeter citadel order book into BigQuery `perimeter_orders_raw`. |
 | `esi-auth/` | Superseded local-machine fallback for the same data — see its README before using it. |
+| `bigquery/stale_orders.sql` | Flags open orders that are old (>=3 days since `issued`) and barely filled (<10%) — "zamrzlý kapitál" (frozen capital) check. Added 2026-08-26 after Matej flagged liquidity as his main trading bottleneck. |
+| `check_stale_orders.sh` | Runs `stale_orders.sql` against the latest already-pulled `my_orders` data — no new ESI scan, just a query. Run any time after `refresh_my_orders.sh`. |
 | `docs/eve-jita-scanner-ops.md` | Mirror of this file, kept in the repo for anyone browsing it directly. |
 
 ## What not to do without Matej explicitly asking first
