@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS `eve_jita_scanner.my_orders` (
   location_id INT64,
   location_name STRING,
   region_id INT64,
-  range STRING,
+  `range` STRING,
   min_volume INT64,
   duration INT64,
   issued TIMESTAMP
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS `eve_jita_scanner.perimeter_orders_raw` (
   volume_remain INT64,
   volume_total INT64,
   min_volume INT64,
-  range STRING,
+  `range` STRING,
   duration INT64,
   issued TIMESTAMP
 )
