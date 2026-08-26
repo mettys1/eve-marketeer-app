@@ -103,16 +103,66 @@ allocation algorithm earlier in this project: his available ISK varies day to da
 the report ranks candidates and he decides how far down the list to go, based on the
 live running-total ("Kumulativní cena") column.
 
+## Coverage gap — `top_volume` mode doesn't include Matej's actual traded items
+
+Found 2026-08-26: `ITEM_MODE=top_volume` ranks by raw region-wide volume, which surfaces
+ammo/minerals/moon-goo almost exclusively. It does **not** include most of what Matej
+actually runs buy orders on — T1 hulls (Rifter, Punisher, Cormorant, Catalyst, Vexor,
+Rupture, Myrmidon), T2 modules (shield/armor reppers, autocannons, tracking disruptors,
+ancillary current routers), skill injectors, or boosters. Of a 21-order sample only 2
+items (Caldari Navy Antimatter Charge L, Photon Microprocessor) showed up in that day's
+`recompute_top_of_book.csv`. Don't assume `top_volume` mode covers his real positions —
+cross-check against `my_orders.csv` (see ESI section below) or fall back to
+`ITEM_MODE=watchlist` when evaluating his actual open orders.
+
+## ESI character orders — auto-pull instead of screenshots (added 2026-08-26)
+
+`esi-auth/` pulls Matej's own live open orders (buy + sell, any station/structure)
+directly from ESI via OAuth2 PKCE (public/native client, no secret stored anywhere) —
+replacing manual in-game screenshots. One-time setup (register an app at
+developers.eveonline.com, run `get_refresh_token.js` once) is entirely on Matej's side —
+same "I can't do the interactive OAuth consent flow" reasoning as `deploy.sh`'s Cloud
+Build connection step. See `esi-auth/README.md` for the exact steps. Once set up:
+
+```
+EVE_SSO_CLIENT_ID=<his client id> node esi-auth/fetch_my_orders.js
+```
+
+writes `my_orders.csv` (order_id, type_id, item_name, is_buy_order, price,
+volume_remain, volume_total, location_id, location_name, region_id, range, min_volume,
+duration, issued) — upload it into the conversation the same way as
+`recompute_top_of_book.csv`. **Status as of 2026-08-26: code written, not yet run by
+Matej** — no `.credentials.json` exists yet, so this can't be used until he completes
+the one-time setup. Don't assume it's live; ask if he's done the setup before relying
+on `my_orders.csv` existing.
+
+Also added the same day, same scope group: `esi-auth/fetch_perimeter_market.js` pulls
+the **full order book** of the Perimeter citadel (structure_id `1044752365771`, "0.0%
+Neutral States Market HQ") — where Matej's own buy orders actually sit. This needs a
+second scope, `esi-markets.structure_markets.v1`, requested explicitly by Matej
+2026-08-26 because Jita's daily pipeline only covers the *public NPC station* — a
+player-owned citadel's market is invisible to unauthenticated ESI/EVE
+Tycoon/Fuzzwork entirely, authenticated per-structure access is the only way to see
+it. Writes `perimeter_orders_raw.csv` + `perimeter_top_of_book.csv` (same shape as
+`recompute_top_of_book.csv`, so it drops straight into `reports/generate_reports.py`
+if a separate Perimeter dashboard/report is ever wanted — not built yet, ask if he
+wants one). Same one-time-setup caveat applies: needs Matej's `.credentials.json` to
+carry the structure_markets scope — if he authorized before this scope was added to
+`get_refresh_token.js`, he needs to re-run the login script to pick it up.
+
 ## Files in the repo
 
 | File | Purpose |
 |---|---|
 | `deploy.sh` | One-time GCP bootstrap (project, BigQuery, Artifact Registry, Cloud Run Job, IAM). Idempotent — safe to re-run. `SETUP_SCHEDULER=false` keeps it manual-only (current default preference). |
-| `poller/poller.js` | Cloud Run Job source. `ITEM_MODE=top_volume` (default) scans the ~750 highest-volume items in the region; `ITEM_MODE=watchlist` falls back to an old hand-picked list. |
+| `poller/poller.js` | Cloud Run Job source. `ITEM_MODE=top_volume` (default) scans the ~750 highest-volume items in the region; `ITEM_MODE=watchlist` falls back to an old hand-picked list. See coverage-gap note above. |
 | `bigquery/schema.sql` | Table definitions. |
 | `bigquery/recompute_top_of_book.sql` | Recomputes prices/margins from already-collected raw order data — no new scan needed. Run this any time the pricing/filter logic needs a redo without waiting for tomorrow's scan. |
 | `refresh.sh` | One-command daily refresh: new scan + recompute, in one call. |
 | `reports/generate_reports.py` | Builds the `.xlsx` report + `.html` dashboard from a `recompute_top_of_book.csv`. |
+| `esi-auth/get_refresh_token.js` | One-time OAuth login (Matej runs, not Claude) — saves a refresh token. Scopes: `esi-markets.read_character_orders.v1`, `esi-markets.structure_markets.v1`. |
+| `esi-auth/fetch_my_orders.js` | Pulls Matej's live open orders from ESI into `my_orders.csv`. |
+| `esi-auth/fetch_perimeter_market.js` | Pulls the full Perimeter citadel order book (structure_id `1044752365771`) into `perimeter_orders_raw.csv` + a top-of-book aggregate `perimeter_top_of_book.csv` shaped like `recompute_top_of_book.csv`. |
 | `docs/eve-jita-scanner-ops.md` | Mirror of this file, kept in the repo for anyone browsing it directly. |
 
 ## What not to do without Matej explicitly asking first
@@ -123,10 +173,15 @@ live running-total ("Kumulativní cena") column.
   above.
 - Don't change the pricing methodology without re-reading the history above; two
   different plausible-looking approaches already turned out to be wrong this project.
+- Don't widen the ESI OAuth scope (e.g. add wallet) without asking first, even though
+  the README mentions how — each added scope is a re-consent Matej has to click through.
 
 ## Where things might go next (mentioned, not yet requested)
 
 - Matej said he may start sharing snapshots of his own actual buys/sells from his EVE
-  account, to compare "what the report recommended" vs. "what actually worked." No
-  format or cadence has been discussed yet — ask him when it comes up rather than
-  guessing a structure.
+  account, to compare "what the report recommended" vs. "what actually worked." Superseded
+  2026-08-26 by the ESI `my_orders.csv` pull above, which gets this from source instead of
+  a manual snapshot — but he may still want a *history* of past buys/sells (not just
+  currently-open orders) at some point; ESI's character orders endpoint only returns
+  currently open orders, not history, so that would need a different endpoint
+  (`/characters/{id}/orders/history/`) if he asks for it.

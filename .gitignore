@@ -3,3 +3,7 @@ node_modules/
 .env
 .DS_Store
 scan-latest.json
+esi-auth/.credentials.json
+my_orders.csv
+perimeter_orders_raw.csv
+perimeter_top_of_book.csv

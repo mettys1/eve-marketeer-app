@@ -4,6 +4,34 @@ A scheduled Cloud Run Job that scans ESI directly (no Fuzzwork/EVE Tycoon) and w
 BigQuery: buy/sell orders, aggregated margins, and daily turnover history. Replaces the manual
 `node esi-scan.js` workflow with something that runs itself.
 
+## CCP compliance
+
+This project accesses EVE Online market data and (via `esi-auth/`) character order data
+through CCP's ESI under CCP's [Developer License Agreement](https://developers.eveonline.com/license-agreement).
+It's a personal, non-commercial tool used solely to support Matej's own play of EVE — it is
+not distributed to other players, doesn't charge any fee, and doesn't monetize in any way
+(Section 4 of the Agreement). Reviewed 2026-08-26 — key points to keep in mind if this
+project grows:
+
+- **Non-commercial only** (Section 4.1–4.3): don't add payment, subscriptions, ads, or any
+  monetization beyond what Section 4.4 explicitly allows (in-game ISK payment for access,
+  voluntary real-money donations to offset hosting costs, or general — not EVE-targeted —
+  ad revenue). None of that applies today; this is solo-use.
+- **Reasonable request volume** (Section 2.5): the poller runs once a day, manually
+  triggered, with modest concurrency (`RANK_CONCURRENCY=10`, `SCAN_CONCURRENCY=6`) — don't
+  crank the schedule or concurrency up without thinking about ESI's rate limits.
+- **Character data**: `esi-auth/` only ever reads Matej's own orders, with his own explicit
+  OAuth consent (Section 2.3(c) — no tracking other players without consent). Don't extend
+  it to pull other characters' data without a login flow for each of them individually.
+- **Attribution** (Section 7.1): the dashboard footer and this README carry CCP's required
+  trademark notice. Keep it if you regenerate the dashboard (`reports/generate_reports.py`
+  writes it into the footer automatically).
+- Not legal advice — if this project is ever distributed to other players or monetized in
+  any way, re-read the Agreement in full and probably talk to an actual lawyer first.
+
+"EVE", "EVE Online", "CCP", and all related logos and images are trademarks or registered
+trademarks of CCP hf.
+
 
 
 ## What's in here

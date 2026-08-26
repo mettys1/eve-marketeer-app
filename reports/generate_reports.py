@@ -354,6 +354,8 @@ DASHBOARD_TEMPLATE = r"""<!doctype html>
 
   <footer class="notes">
     <strong>Metodika.</strong> Ceny = top-of-book, tedy nejlepší stojící nákupní/prodejní order na stanici Jita 4-4 — stejné číslo jako „Market Buy/Sell" v klientu. Marže a zisk/kus jsou po odečtení broker fee (1,382 %) a sales tax (3,375 %). Doporučené množství = 15 % 14denního průměrného denního obratu — čistě likviditní úvaha, není vázáno na žádný kapitálový strop. Podrobná historie metodiky a známé problémy: viz docs/eve-jita-scanner-ops.md v repu.
+    <br><br>
+    Tržní data přes CCP's ESI, pro osobní nekomerční použití v souladu s CCP's Developer License Agreement. „EVE", „EVE Online", „CCP" a související loga jsou ochranné známky nebo registrované ochranné známky CCP hf.
   </footer>
 
 </div>
