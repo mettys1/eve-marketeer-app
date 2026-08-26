@@ -41,7 +41,7 @@ must already be enabled on the app in the CCP portal — same requirement as bef
 ## Getting fresh data
 
 Standardized 2026-08-26 to the exact same shape as the main Jita pipeline's
-`refresh.sh` — one script per data source, each does "run the Cloud Run Job, then
+`refresh_jita.sh` — one script per data source, each does "run the Cloud Run Job, then
 pull a ready-to-upload CSV out of BigQuery":
 
 ```

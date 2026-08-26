@@ -19,7 +19,7 @@ his available ISK varies day to day. The report just ranks candidates; he picks.
 - **Cloud Run Job** `eve-jita-poller` (region `europe-west1`, project
   `eve-jita-scanner-21359`) — scans ESI public market data, writes to BigQuery.
   Batch job, run-to-completion, ~2Gi memory. Triggered manually via
-  `gcloud run jobs execute` (wrapped in `refresh.sh` — see below).
+  `gcloud run jobs execute` (wrapped in `refresh_jita.sh` — see below).
 - **BigQuery** dataset `eve_jita_scanner`:
   - `market_snapshots` — one row per (scan, item) aggregate. **Can have >1 row per
     (type_id, scan_date)** if the job ran more than once that day — always dedupe by
@@ -33,7 +33,7 @@ his available ISK varies day to day. The report just ranks candidates; he picks.
 
 ## Daily refresh workflow
 
-1. Matej runs `bash refresh.sh` in Cloud Shell, from the repo root. This does two
+1. Matej runs `bash refresh_jita.sh` in Cloud Shell, from the repo root. This does two
    things: (a) executes the Cloud Run Job (new scan, few minutes), (b) runs
    `bigquery/recompute_top_of_book.sql` and saves the result to
    `recompute_top_of_book.csv`.
@@ -177,7 +177,8 @@ standardizovat"): added `bigquery/recompute_perimeter_top_of_book.sql` (same
 top-of-book/margin logic as `recompute_top_of_book.sql`, minus the `location_id`
 filter — `perimeter_orders_raw` is already single-structure — and minus
 `avg_daily_volume_14d`, no equivalent history table exists for Perimeter yet) and two
-refresh scripts mirroring `refresh.sh`:
+refresh scripts mirroring `refresh_jita.sh` (itself renamed the same day from
+`refresh.sh`, for naming consistency once there were three pipelines instead of one):
 
 ```
 bash refresh_my_orders.sh     # runs esi-my-orders-poller, pulls my_orders_latest.csv
@@ -194,7 +195,7 @@ Upload either CSV into the conversation the same way as `recompute_top_of_book.c
 | `poller/poller.js` | Cloud Run Job source. `ITEM_MODE=top_volume` (default) scans the ~750 highest-volume items in the region; `ITEM_MODE=watchlist` falls back to an old hand-picked list. See coverage-gap note above. |
 | `bigquery/schema.sql` | Table definitions. |
 | `bigquery/recompute_top_of_book.sql` | Recomputes prices/margins from already-collected raw order data — no new scan needed. Run this any time the pricing/filter logic needs a redo without waiting for tomorrow's scan. |
-| `refresh.sh` | One-command daily refresh: new scan + recompute, in one call. |
+| `refresh_jita.sh` | One-command daily refresh: new scan + recompute, in one call. (Renamed from `refresh.sh` 2026-08-26 — delete the old `refresh.sh` from the repo, it's replaced by this.) |
 | `reports/generate_reports.py` | Builds the `.xlsx` report + `.html` dashboard from a `recompute_top_of_book.csv`. |
 | `deploy_esi.sh` | One-time GCP bootstrap for the ESI login service + jobs (Firestore, Secret Manager, Cloud Run service + 2 jobs, IAM). Primary path — see ESI section above. |
 | `bigquery/recompute_perimeter_top_of_book.sql` | Perimeter equivalent of `recompute_top_of_book.sql` — same top-of-book/margin logic, sourced from `perimeter_orders_raw`. |
