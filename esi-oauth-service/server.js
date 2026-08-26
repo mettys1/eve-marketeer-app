@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const { Firestore } = require('@google-cloud/firestore');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+const { BigQuery } = require('@google-cloud/bigquery');
 
 const PORT = process.env.PORT || 8080;
 const CLIENT_ID = process.env.EVE_SSO_CLIENT_ID;
@@ -31,6 +32,11 @@ const CLIENT_SECRET = process.env.EVE_SSO_CLIENT_SECRET;
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || 'eve-jita-scanner-21359';
 const CREDENTIALS_SECRET_NAME = process.env.CREDENTIALS_SECRET_NAME || 'esi-credentials';
 const LOGIN_KEY = process.env.LOGIN_KEY || '';
+// Reuses LOGIN_KEY as the guard for /report too, unless a separate REPORT_KEY is set —
+// one secret to keep track of is simpler, and both endpoints are equally "only Matej
+// should hit this" in sensitivity.
+const REPORT_KEY = process.env.REPORT_KEY || LOGIN_KEY;
+const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 const SCOPES = 'esi-markets.read_character_orders.v1 esi-markets.structure_markets.v1';
 const SSO_BASE = 'https://login.eveonline.com';
 const STATE_COLLECTION = 'oauth_pending';
@@ -38,6 +44,105 @@ const STATE_TTL_MS = 10 * 60 * 1000; // PKCE flow should complete within 10 minu
 
 const firestore = new Firestore({ projectId: GCP_PROJECT_ID });
 const secretClient = new SecretManagerServiceClient();
+const bigquery = new BigQuery({ projectId: GCP_PROJECT_ID });
+
+// Named, read-only reports Claude can pull via GET /report?key=...&name=...
+// Deliberately an ALLOWLIST of fixed queries, not arbitrary SQL passthrough — this
+// endpoint is unauthenticated apart from the shared key, so it should only ever be
+// able to run the exact same SELECTs that already live in bigquery/*.sql, nothing
+// Claude (or anyone with the URL) could use to write/delete data.
+const REPORTS = {
+  my_orders_analysis: `
+    WITH latest_orders AS (
+      SELECT * EXCEPT(rn) FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
+        FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
+      ) WHERE rn = 1
+    ),
+    perimeter_book AS (
+      SELECT type_id,
+        MAX(IF(is_buy_order, price, NULL)) AS best_buy,
+        MIN(IF(NOT is_buy_order, price, NULL)) AS best_sell,
+        COUNTIF(is_buy_order) AS buy_orders,
+        COUNTIF(NOT is_buy_order) AS sell_orders
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.perimeter_orders_raw\`
+      WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.perimeter_orders_raw\`)
+      GROUP BY type_id
+    ),
+    jita_book AS (
+      SELECT type_id,
+        MAX(IF(is_buy_order, price, NULL)) AS best_buy,
+        MIN(IF(NOT is_buy_order, price, NULL)) AS best_sell,
+        COUNTIF(is_buy_order) AS buy_orders,
+        COUNTIF(NOT is_buy_order) AS sell_orders
+      FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_orders_raw\`
+      WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_orders_raw\`)
+        AND location_id = 60003760
+      GROUP BY type_id
+    )
+    SELECT o.location_name, o.item_name, o.type_id, o.is_buy_order, o.price AS my_price,
+      o.volume_remain, o.volume_total, o.issued,
+      p.best_buy AS perim_best_buy, p.best_sell AS perim_best_sell,
+      p.buy_orders AS perim_buy_ct, p.sell_orders AS perim_sell_ct,
+      j.best_buy AS jita_best_buy, j.best_sell AS jita_best_sell,
+      j.buy_orders AS jita_buy_ct, j.sell_orders AS jita_sell_ct
+    FROM latest_orders o
+    LEFT JOIN perimeter_book p USING (type_id)
+    LEFT JOIN jita_book j USING (type_id)
+    ORDER BY o.location_name, o.item_name`,
+
+  stale_orders: `
+    WITH latest_orders AS (
+      SELECT * EXCEPT(rn) FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
+        FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
+      ) WHERE rn = 1
+    )
+    SELECT location_name, item_name, type_id, is_buy_order, price, volume_remain, volume_total,
+      ROUND(SAFE_DIVIDE(volume_total - volume_remain, volume_total) * 100, 1) AS fill_pct,
+      DATE_DIFF(CURRENT_DATE(), DATE(issued), DAY) AS order_age_days,
+      ROUND(price * volume_remain, 0) AS isk_locked,
+      CASE
+        WHEN DATE_DIFF(CURRENT_DATE(), DATE(issued), DAY) >= 3
+         AND SAFE_DIVIDE(volume_total - volume_remain, volume_total) < 0.10
+        THEN 'STALE'
+        WHEN DATE_DIFF(CURRENT_DATE(), DATE(issued), DAY) >= 1
+         AND SAFE_DIVIDE(volume_total - volume_remain, volume_total) < 0.10
+        THEN 'watch'
+        ELSE 'moving'
+      END AS status
+    FROM latest_orders
+    ORDER BY isk_locked DESC`,
+
+  jita_top_of_book: `
+    SELECT * FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`
+    WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`)
+    ORDER BY region_margin_pct DESC
+    LIMIT 500`,
+};
+
+async function handleReport(req, reqUrl, res) {
+  if (REPORT_KEY && reqUrl.searchParams.get('key') !== REPORT_KEY) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'missing or wrong ?key=' }));
+    return;
+  }
+  const name = reqUrl.searchParams.get('name');
+  const sql = REPORTS[name];
+  if (!sql) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `unknown report name`, available: Object.keys(REPORTS) }));
+    return;
+  }
+  try {
+    const [rows] = await bigquery.query({ query: sql });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ name, row_count: rows.length, rows }));
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
 
 function base64url(buf) {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -169,6 +274,8 @@ const server = http.createServer(async (req, res) => {
       await handleLogin(req, reqUrl, res);
     } else if (reqUrl.pathname === '/callback') {
       await handleCallback(req, reqUrl, res);
+    } else if (reqUrl.pathname === '/report') {
+      await handleReport(req, reqUrl, res);
     } else if (reqUrl.pathname === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');

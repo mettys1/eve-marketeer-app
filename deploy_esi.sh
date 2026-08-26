@@ -64,6 +64,13 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${OAUTH_SA_EMAIL}" --role="roles/datastore.user" > /dev/null
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${OAUTH_SA_EMAIL}" --role="roles/secretmanager.admin" > /dev/null
+# bigquery.dataViewer + jobUser so the /report endpoint (added 2026-08-26) can run the
+# same read-only SELECTs Matej was running manually via `bq query` — lets Claude pull
+# results directly instead of him copy-pasting CSVs into the chat every time.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${OAUTH_SA_EMAIL}" --role="roles/bigquery.dataViewer" > /dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${OAUTH_SA_EMAIL}" --role="roles/bigquery.jobUser" > /dev/null
 
 echo "== Step 5: service account for esi-jobs =="
 gcloud iam service-accounts create "$JOBS_SA" --display-name="ESI jobs (my orders / Perimeter)" --project="$PROJECT_ID" \
@@ -88,7 +95,7 @@ gcloud run deploy "$OAUTH_SERVICE_NAME" \
   --service-account="$OAUTH_SA_EMAIL" \
   --allow-unauthenticated \
   --min-instances=0 --max-instances=2 \
-  --set-env-vars="EVE_SSO_CLIENT_ID=${EVE_SSO_CLIENT_ID},EVE_SSO_CLIENT_SECRET=${EVE_SSO_CLIENT_SECRET},GCP_PROJECT_ID=${PROJECT_ID},CREDENTIALS_SECRET_NAME=${CREDENTIALS_SECRET_NAME},LOGIN_KEY=${LOGIN_KEY}"
+  --set-env-vars="EVE_SSO_CLIENT_ID=${EVE_SSO_CLIENT_ID},EVE_SSO_CLIENT_SECRET=${EVE_SSO_CLIENT_SECRET},GCP_PROJECT_ID=${PROJECT_ID},CREDENTIALS_SECRET_NAME=${CREDENTIALS_SECRET_NAME},LOGIN_KEY=${LOGIN_KEY},BQ_DATASET=${BQ_DATASET}"
 
 SERVICE_URL=$(gcloud run services describe "$OAUTH_SERVICE_NAME" --region="$REGION" --project="$PROJECT_ID" --format='value(status.url)')
 
@@ -102,6 +109,11 @@ echo "worked for the local flow, this service needs its own real URL.) Save."
 echo ""
 echo "Then log in any time by visiting:"
 echo "  ${SERVICE_URL}/login?key=${LOGIN_KEY}"
+echo ""
+echo "== Read-only reports (Claude pulls these directly, no CSV needed) =="
+echo "  ${SERVICE_URL}/report?key=${LOGIN_KEY}&name=my_orders_analysis"
+echo "  ${SERVICE_URL}/report?key=${LOGIN_KEY}&name=stale_orders"
+echo "  ${SERVICE_URL}/report?key=${LOGIN_KEY}&name=jita_top_of_book"
 echo ""
 
 echo "== Step 8: build + push esi-jobs image =="
