@@ -126,6 +126,40 @@ const REPORTS = {
     ORDER BY region_margin_pct DESC
     LIMIT 500`,
 
+  // Added 2026-08-26 — jita_top_of_book's raw 500 rows blow past what WebFetch's
+  // summarizer can hold without truncating, and most of those rows are unusable anyway
+  // (near-zero-volume niche items whose "margin" is a reference-price artifact, or
+  // peanuts-per-unit items where a good % margin is still irrelevant ISK). This does the
+  // filtering/scoring in SQL instead of hoping the summarizer keeps enough rows:
+  //   - drops Skill Injectors by name (known loss-makers this account, per Matej)
+  //   - unit price floor (avoid peanuts-per-unit items like Guristas Tungsten Charge L)
+  //   - liquidity floor on both order counts and 14-day observed volume
+  //   - sane margin band (excludes near-0% dead trades AND the >1000% reference-price
+  //     artifacts that show up on illiquid niche items)
+  // Ranked by profit-per-unit (capital growth), not margin %, per Matej's own standing
+  // instruction to the eve-jita-scanner skill (see its SKILL.md).
+  capital_deployment_candidates: `
+    WITH latest AS (
+      SELECT * FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`
+      WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`)
+    )
+    SELECT
+      item_name, type_id,
+      station_buy_avg5, station_sell_avg5,
+      station_buy_orders, station_sell_orders,
+      station_buy_volume, station_sell_volume,
+      avg_daily_volume_14d,
+      station_margin_pct,
+      ROUND(station_sell_avg5 * (1 - 0.0139 - 0.03375) - station_buy_avg5 * 1.0139, 2) AS profit_per_unit_new_order
+    FROM latest
+    WHERE item_name NOT LIKE '%Skill Injector%'
+      AND station_sell_avg5 >= 5000
+      AND station_buy_orders >= 5 AND station_sell_orders >= 5
+      AND avg_daily_volume_14d >= 30
+      AND station_margin_pct BETWEEN 4 AND 60
+    ORDER BY profit_per_unit_new_order DESC
+    LIMIT 40`,
+
   // Added 2026-08-26 right after esi-wallet-poller's first successful run — a quick
   // sanity check that transactions/journal actually landed (row counts + date range)
   // before building anything more elaborate (real fill-velocity vs. `issued`-based
