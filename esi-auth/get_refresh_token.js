@@ -84,18 +84,18 @@ async function main() {
       // Confidential application rather than Public/native), send it via HTTP Basic
       // Auth alongside PKCE — set EVE_SSO_CLIENT_SECRET in your shell, never hardcode
       // it here or commit it anywhere.
-      if (process.env.EVE_SSO_CLIENT_SECRET) {
+      const usingBasicAuth = Boolean(process.env.EVE_SSO_CLIENT_SECRET);
+      if (usingBasicAuth) {
         authHeaders.Authorization = `Basic ${Buffer.from(`${CLIENT_ID}:${process.env.EVE_SSO_CLIENT_SECRET}`).toString('base64')}`;
       }
+      // EVE SSO rejects the request if client_id is present both in the Authorization
+      // header AND the body — include it in exactly one place.
+      const bodyParams = { grant_type: 'authorization_code', code, code_verifier: codeVerifier };
+      if (!usingBasicAuth) bodyParams.client_id = CLIENT_ID;
       const tokenRes = await fetch(`${SSO_BASE}/v2/oauth/token`, {
         method: 'POST',
         headers: authHeaders,
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          client_id: CLIENT_ID,
-          code_verifier: codeVerifier,
-        }),
+        body: new URLSearchParams(bodyParams),
       });
       const tokenJson = await tokenRes.json();
       if (!tokenRes.ok) throw new Error(`Token exchange failed: ${JSON.stringify(tokenJson)}`);

@@ -1,0 +1,13 @@
+{
+  "name": "esi-jobs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloud Run Jobs: pull ESI order data (character orders, Perimeter structure market) using credentials from Secret Manager, write to BigQuery.",
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9.0",
+    "@google-cloud/secret-manager": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

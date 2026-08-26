@@ -12,6 +12,12 @@
 // issued. Upload that CSV back into the conversation with Claude the same way you do
 // recompute_top_of_book.csv — it'll cross-reference against fresh market prices and
 // tell you what to reprice or cancel.
+//
+// Also appends every row to BigQuery (`eve_jita_scanner.my_orders`), same project as
+// the rest of the pipeline — needs `npm install` once in this folder (for
+// @google-cloud/bigquery) and `gcloud auth application-default login` once on this
+// machine (ADC — separate from the ESI OAuth login above, this is your own GCP login).
+// Set SKIP_BIGQUERY=1 to skip that and only write the CSV.
 
 'use strict';
 const fs = require('fs');
@@ -20,6 +26,8 @@ const path = require('path');
 const SSO_BASE = 'https://login.eveonline.com';
 const ESI_BASE = 'https://esi.evetech.net/latest';
 const CREDS_PATH = path.join(__dirname, '.credentials.json');
+const GCP_PROJECT_ID = 'eve-jita-scanner-21359';
+const BQ_DATASET = 'eve_jita_scanner';
 
 // A couple of well-known structure/station names worth hardcoding since ESI can't
 // resolve player-owned citadels by ID without an extra authenticated call per
@@ -33,13 +41,18 @@ async function refreshAccessToken(clientId, refreshToken) {
   const headers = { 'Content-Type': 'application/x-www-form-urlencoded', Host: 'login.eveonline.com' };
   // Set EVE_SSO_CLIENT_SECRET if your app registration is Confidential (issued a
   // Client Secret) rather than Public/native — never hardcode the secret here.
-  if (process.env.EVE_SSO_CLIENT_SECRET) {
+  const usingBasicAuth = Boolean(process.env.EVE_SSO_CLIENT_SECRET);
+  if (usingBasicAuth) {
     headers.Authorization = `Basic ${Buffer.from(`${clientId}:${process.env.EVE_SSO_CLIENT_SECRET}`).toString('base64')}`;
   }
+  // EVE SSO rejects the request if client_id is present both in the Authorization
+  // header AND the body — include it in exactly one place.
+  const bodyParams = { grant_type: 'refresh_token', refresh_token: refreshToken };
+  if (!usingBasicAuth) bodyParams.client_id = clientId;
   const res = await fetch(`${SSO_BASE}/v2/oauth/token`, {
     method: 'POST',
     headers,
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId }),
+    body: new URLSearchParams(bodyParams),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(`Token refresh failed: ${JSON.stringify(json)}`);
@@ -120,6 +133,41 @@ async function main() {
   fs.writeFileSync(outPath, lines.join('\n') + '\n');
   console.log(`Wrote ${outPath}`);
   console.log('Upload this CSV into the conversation with Claude for reprice/cancel evaluation.');
+
+  if (process.env.SKIP_BIGQUERY) {
+    console.log('SKIP_BIGQUERY set — not writing to BigQuery.');
+    return;
+  }
+  try {
+    const { BigQuery } = require('@google-cloud/bigquery');
+    const bq = new BigQuery({ projectId: GCP_PROJECT_ID });
+    const scannedAt = new Date();
+    const scanDate = scannedAt.toISOString().slice(0, 10);
+    const rows = orders.map((o) => ({
+      scanned_at: scannedAt.toISOString(),
+      scan_date: scanDate,
+      order_id: o.order_id,
+      type_id: o.type_id,
+      item_name: typeNames[o.type_id] || null,
+      is_buy_order: o.is_buy_order,
+      price: o.price,
+      volume_remain: o.volume_remain,
+      volume_total: o.volume_total,
+      location_id: o.location_id,
+      location_name: KNOWN_LOCATIONS[o.location_id] || null,
+      region_id: o.region_id,
+      range: o.range,
+      min_volume: o.min_volume,
+      duration: o.duration,
+      issued: o.issued,
+    }));
+    await bq.dataset(BQ_DATASET).table('my_orders').insert(rows);
+    console.log(`Wrote ${rows.length} rows to BigQuery ${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders`);
+  } catch (err) {
+    console.error('BigQuery write failed (CSV above was still written fine) —', err.message);
+    console.error('If this is your first run: "npm install" in esi-auth/, and');
+    console.error('"gcloud auth application-default login" once on this machine.');
+  }
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

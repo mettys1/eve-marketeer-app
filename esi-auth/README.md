@@ -1,4 +1,10 @@
-# ESI character orders — auto-pull instead of screenshots
+# ESI character orders — auto-pull instead of screenshots (local fallback)
+
+**Superseded by `esi-oauth-service/` + `esi-jobs/`** (2026-08-26) — that setup runs
+entirely in GCP (Cloud Run service for login, Cloud Run Jobs for pulling data), no
+local machine or browser-on-the-same-box requirement. Use this `esi-auth/` folder only
+if you specifically want to run the pull from a local machine instead (e.g. no
+`gcloud`/GCP handy) — see `esi-oauth-service/README.md` for the primary path.
 
 Pulls your own open market orders (buy + sell, any station/structure) straight from
 ESI, authenticated as you via EVE SSO. Replaces manually screenshotting the in-game
@@ -43,6 +49,22 @@ once for setup and then any time you want fresh order data.
    refresh token to `esi-auth/.credentials.json` (already gitignored — never commit
    this file, it's a standing read-only login to that character).
 
+3. So the fetch scripts can also write into BigQuery (same project/dataset as the
+   daily Jita pipeline — `my_orders` and `perimeter_orders_raw` tables, see
+   `bigquery/schema.sql`), two more one-time things on this machine:
+   ```
+   cd esi-auth && npm install
+   gcloud auth application-default login
+   ```
+   The second command is a **separate** login from the ESI one above — it's your own
+   Google/GCP identity (Application Default Credentials), used so the BigQuery client
+   library can write to `eve-jita-scanner-21359` as you. Needs `roles/bigquery.dataEditor`
+   / `roles/bigquery.jobUser` on that project for your account (same roles `deploy.sh`
+   grants the poller's service account — if you're the one who ran `deploy.sh`, you're
+   almost certainly already the project owner and have this). If you'd rather skip
+   BigQuery entirely and just get the CSVs, set `SKIP_BIGQUERY=1` when running either
+   fetch script below — everything else works the same.
+
 ## Getting fresh order data
 
 ```
@@ -50,10 +72,12 @@ EVE_SSO_CLIENT_ID=<id> EVE_SSO_CLIENT_SECRET=<secret> node esi-auth/fetch_my_ord
 ```
 
 Writes `my_orders.csv` in the repo root with every currently open order (buy and
-sell, wherever they're sitting — Jita, Perimeter, anywhere). Upload that CSV into the
-conversation with Claude the same way you already do `recompute_top_of_book.csv` —
-Claude cross-references it against fresh market prices and tells you what to
-reprice, hold, or cancel.
+sell, wherever they're sitting — Jita, Perimeter, anywhere), and also appends those
+rows to BigQuery (`eve_jita_scanner.my_orders` — a history table, so re-running this
+over time builds a record of how each order's price/fill actually moved, not just a
+snapshot). Upload the CSV into the conversation with Claude the same way you already
+do `recompute_top_of_book.csv` — Claude cross-references it against fresh market
+prices and tells you what to reprice, hold, or cancel.
 
 Consider exporting `EVE_SSO_CLIENT_ID` (and `EVE_SSO_CLIENT_SECRET`, if you have one)
 in your shell profile so you don't have to paste them every time. The Client ID isn't
@@ -73,6 +97,10 @@ structure's market requires this authenticated per-structure call. Writes
 `perimeter_orders_raw.csv` (every order) and `perimeter_top_of_book.csv` (one row per
 item: best buy/sell + margin, same shape as `recompute_top_of_book.csv` — feed it to
 `reports/generate_reports.py` the same way, or upload straight into the conversation).
+Also appends the raw order rows to BigQuery (`eve_jita_scanner.perimeter_orders_raw`),
+same as `fetch_my_orders.js` above (needs the same one-time `npm install` /
+`gcloud auth application-default login` — see setup step 3).
+
 Needs the `esi-markets.structure_markets.v1` scope from setup above — if your saved
 `.credentials.json` predates adding that scope, re-run `get_refresh_token.js` first.
 A 403 here usually means either the scope is missing, or this character has never

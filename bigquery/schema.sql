@@ -73,3 +73,53 @@ CREATE TABLE IF NOT EXISTS `eve_jita_scanner.market_history` (
 )
 PARTITION BY history_date
 CLUSTER BY type_id;
+
+-- Matej's own open orders, pulled from ESI via esi-auth/fetch_my_orders.js (run locally,
+-- not from Cloud Run — see esi-auth/README.md). One row per (pull, order) — same order_id
+-- reappears across pulls as its price/volume_remain change over time, so this doubles as a
+-- history of how each order actually filled/got repriced, not just a snapshot.
+CREATE TABLE IF NOT EXISTS `eve_jita_scanner.my_orders` (
+  scanned_at TIMESTAMP NOT NULL,
+  scan_date DATE NOT NULL,
+  order_id INT64 NOT NULL,
+  type_id INT64 NOT NULL,
+  item_name STRING,
+  is_buy_order BOOL,
+  price FLOAT64,
+  volume_remain INT64,
+  volume_total INT64,
+  location_id INT64,
+  location_name STRING,
+  region_id INT64,
+  range STRING,
+  min_volume INT64,
+  duration INT64,
+  issued TIMESTAMP
+)
+PARTITION BY scan_date
+CLUSTER BY type_id;
+
+-- Full order book of the Perimeter citadel ("0.0% Neutral States Market HQ", structure_id
+-- 1044752365771), pulled from ESI via esi-auth/fetch_perimeter_market.js (run locally).
+-- Same shape/purpose as market_orders_raw above, but for a player-owned structure, which
+-- (unlike Jita 4-4) needs an authenticated per-structure call — see esi-auth/README.md.
+CREATE TABLE IF NOT EXISTS `eve_jita_scanner.perimeter_orders_raw` (
+  scanned_at TIMESTAMP NOT NULL,
+  scan_date DATE NOT NULL,
+  type_id INT64 NOT NULL,
+  item_name STRING,
+  order_id INT64,
+  is_buy_order BOOL,
+  price FLOAT64,
+  volume_remain INT64,
+  volume_total INT64,
+  min_volume INT64,
+  range STRING,
+  duration INT64,
+  issued TIMESTAMP
+)
+PARTITION BY scan_date
+CLUSTER BY type_id, is_buy_order
+OPTIONS (
+  partition_expiration_days = 90
+);

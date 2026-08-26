@@ -1,0 +1,18 @@
+{
+  "name": "esi-oauth-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloud Run service: EVE SSO OAuth callback endpoint, stores a refresh token in Secret Manager for esi-jobs to use.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.10.0",
+    "@google-cloud/secret-manager": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

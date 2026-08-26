@@ -15,6 +15,12 @@
 //                                    fee formula and columns as recompute_top_of_book.csv,
 //                                    so it can be fed straight to reports/generate_reports.py
 //                                    or compared side by side with the Jita numbers.
+//
+// Also appends every raw order to BigQuery (`eve_jita_scanner.perimeter_orders_raw`),
+// same project as the rest of the pipeline — needs `npm install` once in this folder
+// (for @google-cloud/bigquery) and `gcloud auth application-default login` once on
+// this machine (ADC — separate from the ESI OAuth login above, this is your own GCP
+// login). Set SKIP_BIGQUERY=1 to skip that and only write the CSVs.
 
 'use strict';
 const fs = require('fs');
@@ -26,18 +32,25 @@ const CREDS_PATH = path.join(__dirname, '.credentials.json');
 const STRUCTURE_ID = 1044752365771; // Perimeter - 0.0% Neutral States Market HQ
 const BROKER_FEE = 0.01382;
 const SALES_TAX = 0.03375;
+const GCP_PROJECT_ID = 'eve-jita-scanner-21359';
+const BQ_DATASET = 'eve_jita_scanner';
 
 async function refreshAccessToken(clientId, refreshToken) {
   const headers = { 'Content-Type': 'application/x-www-form-urlencoded', Host: 'login.eveonline.com' };
   // Set EVE_SSO_CLIENT_SECRET if your app registration is Confidential (issued a
   // Client Secret) rather than Public/native — never hardcode the secret here.
-  if (process.env.EVE_SSO_CLIENT_SECRET) {
+  const usingBasicAuth = Boolean(process.env.EVE_SSO_CLIENT_SECRET);
+  if (usingBasicAuth) {
     headers.Authorization = `Basic ${Buffer.from(`${clientId}:${process.env.EVE_SSO_CLIENT_SECRET}`).toString('base64')}`;
   }
+  // EVE SSO rejects the request if client_id is present both in the Authorization
+  // header AND the body — include it in exactly one place.
+  const bodyParams = { grant_type: 'refresh_token', refresh_token: refreshToken };
+  if (!usingBasicAuth) bodyParams.client_id = clientId;
   const res = await fetch(`${SSO_BASE}/v2/oauth/token`, {
     method: 'POST',
     headers,
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId }),
+    body: new URLSearchParams(bodyParams),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(`Token refresh failed: ${JSON.stringify(json)}`);
@@ -162,6 +175,42 @@ async function main() {
   fs.writeFileSync(aggPath, aggLines.join('\n') + '\n');
   console.log(`Wrote ${aggPath} (${aggRows.length} type_ids with both a buy and a sell order)`);
   console.log('Upload either/both CSVs into the conversation with Claude.');
+
+  if (process.env.SKIP_BIGQUERY) {
+    console.log('SKIP_BIGQUERY set — not writing to BigQuery.');
+    return;
+  }
+  try {
+    const { BigQuery } = require('@google-cloud/bigquery');
+    const bq = new BigQuery({ projectId: GCP_PROJECT_ID });
+    const scannedAt = new Date();
+    const scanDate = scannedAt.toISOString().slice(0, 10);
+    const rows = orders.map((o) => ({
+      scanned_at: scannedAt.toISOString(),
+      scan_date: scanDate,
+      type_id: o.type_id,
+      item_name: typeNames[o.type_id] || null,
+      order_id: o.order_id,
+      is_buy_order: o.is_buy_order,
+      price: o.price,
+      volume_remain: o.volume_remain,
+      volume_total: o.volume_total,
+      min_volume: o.min_volume,
+      range: o.range,
+      duration: o.duration,
+      issued: o.issued,
+    }));
+    // BigQuery's streaming insert caps out around 10k rows/request — batch just in case
+    // the Perimeter book ever gets that large.
+    for (let i = 0; i < rows.length; i += 5000) {
+      await bq.dataset(BQ_DATASET).table('perimeter_orders_raw').insert(rows.slice(i, i + 5000));
+    }
+    console.log(`Wrote ${rows.length} rows to BigQuery ${GCP_PROJECT_ID}.${BQ_DATASET}.perimeter_orders_raw`);
+  } catch (err) {
+    console.error('BigQuery write failed (CSVs above were still written fine) —', err.message);
+    console.error('If this is your first run: "npm install" in esi-auth/, and');
+    console.error('"gcloud auth application-default login" once on this machine.');
+  }
 }
 
 main().catch((err) => { console.error(err.message); process.exit(1); });
