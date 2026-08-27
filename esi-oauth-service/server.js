@@ -120,9 +120,18 @@ const REPORTS = {
     FROM latest_orders
     ORDER BY isk_locked DESC`,
 
+  // Fixed 2026-08-27 — `scan_date = MAX(scan_date)` only filters to a calendar day,
+  // not a specific scan. On any day with more than one poller run (which is now the
+  // norm — one-off ITEM_MODE overrides, retries, etc.) this let OLD and FRESH rows for
+  // the same item pass through side by side, and whichever happened to sort first won.
+  // Confirmed root cause of 3 straight bad reference-price incidents this session
+  // (Cryoprotectant Solution, Graphene Nanoribbons, Drone Cerebral Fragment — all off
+  // by a lot, always because a row from hours/a day earlier got used instead of the
+  // latest one). Real fix: dedupe to one row per type_id by scanned_at, same pattern
+  // recompute_top_of_book.sql already used correctly.
   jita_top_of_book: `
     SELECT * FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`
-    WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY type_id ORDER BY scanned_at DESC) = 1
     ORDER BY region_margin_pct DESC
     LIMIT 500`,
 
@@ -138,10 +147,11 @@ const REPORTS = {
   //     artifacts that show up on illiquid niche items)
   // Ranked by profit-per-unit (capital growth), not margin %, per Matej's own standing
   // instruction to the eve-jita-scanner skill (see its SKILL.md).
+  // Same scan_date-vs-scanned_at fix as jita_top_of_book above — see that comment.
   capital_deployment_candidates: `
     WITH latest AS (
       SELECT * FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`
-      WHERE scan_date = (SELECT MAX(scan_date) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.market_snapshots\`)
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY type_id ORDER BY scanned_at DESC) = 1
     )
     SELECT
       item_name, type_id,
