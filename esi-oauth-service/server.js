@@ -348,7 +348,14 @@ async function handleReport(req, reqUrl, res) {
     return;
   }
   try {
-    const [rows] = await bigquery.query({ query: sql });
+    // useQueryCache: false — without this, BigQuery serves its cached result for this
+    // exact literal SQL string for up to 24h regardless of the underlying tables having
+    // changed since. Discovered 2026-08-26: two confirmed-successful poller runs in a
+    // row (my_orders, perimeter) produced byte-identical /report output — new orders
+    // placed in-game never appeared. WebFetch cache-busting (?_cb=...) had no effect
+    // because the cache is server-side on BigQuery's end, keyed on the SQL text itself,
+    // not on this endpoint's URL.
+    const [rows] = await bigquery.query({ query: sql, useQueryCache: false });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ name, row_count: rows.length, rows }));
   } catch (err) {
