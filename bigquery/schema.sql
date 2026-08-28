@@ -78,6 +78,14 @@ CLUSTER BY type_id;
 -- not from Cloud Run — see esi-auth/README.md). One row per (pull, order) — same order_id
 -- reappears across pulls as its price/volume_remain change over time, so this doubles as a
 -- history of how each order actually filled/got repriced, not just a snapshot.
+--
+-- is_open — added 2026-08-28. ESI's orders endpoint only returns currently-open orders;
+-- job_my_orders.js now diffs each pull against the previously-open order_ids and writes an
+-- explicit is_open=false row for anything that dropped out, instead of silently leaving the
+-- last-ever-seen row to be misread as "still open" forever (the "phantom order" bug — hit
+-- this session on Vexor, Platinum and a Small Skill Injector that were long since gone).
+-- Rows from before this fix have is_open=NULL; treat NULL the same as TRUE (unknown, assume
+-- open — there's no way to retroactively know when they really closed).
 CREATE TABLE IF NOT EXISTS `eve_jita_scanner.my_orders` (
   scanned_at TIMESTAMP NOT NULL,
   scan_date DATE NOT NULL,
@@ -94,7 +102,8 @@ CREATE TABLE IF NOT EXISTS `eve_jita_scanner.my_orders` (
   `range` STRING,
   min_volume INT64,
   duration INT64,
-  issued TIMESTAMP
+  issued TIMESTAMP,
+  is_open BOOL
 )
 PARTITION BY scan_date
 CLUSTER BY type_id;
