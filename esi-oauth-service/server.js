@@ -232,7 +232,7 @@ const REPORTS = {
     ),
     -- Same is_open fix as my_orders_analysis/stale_orders above. Also coalesces
     -- is_buy_order to FALSE — ESI omits that field entirely on sell orders, which used
-    -- to land as NULL here and made `WHERE NOT is_buy_order` silently match nothing,
+    -- to land as NULL here and made \`WHERE NOT is_buy_order\` silently match nothing,
     -- which is why listed_sell_value always came back NULL. job_my_orders.js now writes
     -- a real boolean going forward; the COALESCE covers pre-fix legacy sell-order rows.
     latest_orders AS (
