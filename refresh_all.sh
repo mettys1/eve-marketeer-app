@@ -51,12 +51,14 @@ bq query --use_legacy_sql=false --project_id="$PROJECT_ID" --format=csv --max_ro
 bq query --use_legacy_sql=false --project_id="$PROJECT_ID" --format=csv --max_rows=5000 \
   < "$REPO_ROOT/bigquery/recompute_perimeter_top_of_book.sql" > "$REPO_ROOT/perimeter_top_of_book.csv"
 
+# is_open filtr přidán 2026-08-28 (fix phantom-order bugu) — bez něj by tu pořád
+# viselo Vexor/Platinum/Small Skill Injector jako "otevřené", i když dávno nejsou.
 bq query --use_legacy_sql=false --project_id="$PROJECT_ID" --format=csv --max_rows=5000 "
 SELECT * EXCEPT(rn) FROM (
   SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
   FROM \`${PROJECT_ID}.eve_jita_scanner.my_orders\`
 )
-WHERE rn = 1
+WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
 ORDER BY scanned_at DESC
 " > "$REPO_ROOT/my_orders_latest.csv"
 

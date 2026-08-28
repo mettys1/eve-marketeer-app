@@ -22,13 +22,15 @@ OUT_CSV="my_orders_latest.csv"
 echo "== 1/2: spouštím stažení tvých orderů z ESI =="
 gcloud run jobs execute "$JOB_NAME" --region="$REGION" --project="$PROJECT_ID" --wait
 
-echo "== 2/2: vytahuji nejnovější řádek pro každý order_id =="
+echo "== 2/2: vytahuji nejnovější řádek pro každý order_id, jen skutečně otevřené =="
+# is_open filtr přidán 2026-08-28 (fix phantom-order bugu) — bez něj by tu pořád
+# viselo Vexor/Platinum/Small Skill Injector jako "otevřené", i když dávno nejsou.
 bq query --use_legacy_sql=false --project_id="$PROJECT_ID" --format=csv --max_rows=5000 "
 SELECT * EXCEPT(rn) FROM (
   SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
   FROM \`${PROJECT_ID}.${DATASET}.my_orders\`
 )
-WHERE rn = 1
+WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
 ORDER BY scanned_at DESC
 " > "$OUT_CSV"
 

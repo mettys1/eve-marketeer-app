@@ -58,12 +58,20 @@ const bigquery = new BigQuery({ projectId: GCP_PROJECT_ID });
 // able to run the exact same SELECTs that already live in bigquery/*.sql, nothing
 // Claude (or anyone with the URL) could use to write/delete data.
 const REPORTS = {
+  // Fixed 2026-08-28 — "phantom order" bug: ESI only returns currently-open orders, so
+  // once one fills/cancels it just vanishes from future pulls, but this table only ever
+  // INSERTs. `WHERE rn = 1` alone happily returns the last-ever-seen row forever with no
+  // way to tell "still open" from "closed days ago" — confirmed this session on Vexor,
+  // Platinum and a Small Skill Injector Matej no longer had. job_my_orders.js now writes
+  // an explicit is_open=false row when an order drops out of ESI's response; this filters
+  // to what's actually still open (NULL = pre-fix legacy row, treated as open — no way to
+  // know retroactively when it really closed).
   my_orders_analysis: `
     WITH latest_orders AS (
       SELECT * EXCEPT(rn) FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
         FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
-      ) WHERE rn = 1
+      ) WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
     ),
     perimeter_book AS (
       SELECT type_id,
@@ -97,12 +105,13 @@ const REPORTS = {
     LEFT JOIN jita_book j USING (type_id)
     ORDER BY o.location_name, o.item_name`,
 
+  // Same is_open fix as my_orders_analysis above — see that comment.
   stale_orders: `
     WITH latest_orders AS (
       SELECT * EXCEPT(rn) FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
         FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
-      ) WHERE rn = 1
+      ) WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
     )
     SELECT location_name, item_name, type_id, is_buy_order, price, volume_remain, volume_total,
       ROUND(SAFE_DIVIDE(volume_total - volume_remain, volume_total) * 100, 1) AS fill_pct,
@@ -221,19 +230,24 @@ const REPORTS = {
       FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.wallet_journal\`
       WHERE date >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
     ),
+    -- Same is_open fix as my_orders_analysis/stale_orders above. Also coalesces
+    -- is_buy_order to FALSE — ESI omits that field entirely on sell orders, which used
+    -- to land as NULL here and made `WHERE NOT is_buy_order` silently match nothing,
+    -- which is why listed_sell_value always came back NULL. job_my_orders.js now writes
+    -- a real boolean going forward; the COALESCE covers pre-fix legacy sell-order rows.
     latest_orders AS (
       SELECT * EXCEPT(rn) FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY scanned_at DESC) AS rn
         FROM \`${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders\`
-      ) WHERE rn = 1
+      ) WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
     ),
     escrow AS (
       SELECT SUM(price * volume_remain) AS locked_in_buy_orders
-      FROM latest_orders WHERE is_buy_order
+      FROM latest_orders WHERE COALESCE(is_buy_order, FALSE)
     ),
     sell_listings AS (
       SELECT SUM(price * volume_remain) AS listed_sell_value
-      FROM latest_orders WHERE NOT is_buy_order
+      FROM latest_orders WHERE NOT COALESCE(is_buy_order, FALSE)
     )
     SELECT
       lb.current_balance, lb.as_of,
