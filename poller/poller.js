@@ -103,6 +103,55 @@ const CANDIDATES_PRICIER = {
   'Isogen': 37, 'Nocxium': 38, 'Zydrine': 39, 'Megacyte': 40, 'Morphite': 11399,
 };
 
+// Added 2026-08-28 — Matej wants ongoing coverage of two categories that fall through
+// the cracks of both top_volume (too low-volume individually to crack top 750) and the
+// hand-picked WATCHLIST (nobody's going to hand-curate every meta variant of every gun
+// upgrade): Salvaged Materials, and the standard fitted T1/meta ship modules (armor
+// plates/hardeners, shield extenders/boosters/hardeners, damage controls, weapon
+// upgrades, tackle/EWAR, sensor/targeting mods, capacitor mods, propulsion). Resolved
+// from ESI's live /markets/groups/ tree (not hand-typed type_ids) so it stays correct as
+// CCP adds new items — see esi-jobs/../discover_market_groups.sh for how these group_ids
+// were found. Deliberately excludes: blueprints, rigs, ammo/charges, implants/boosters,
+// mutaplasmids, drones, and Upwell/POS structure modules — those are different trading
+// questions Matej hasn't asked for yet.
+const SALVAGE_GROUP_IDS = [
+  1863, // Salvaged Materials
+  1862, // Ancient Salvaged Materials
+];
+const MODULE_GROUP_IDS = [
+  // Armor plates (by size) + hardeners (by damage type) + resistance coatings
+  1672, 1673, 1674, 1675, 1676, 2240, 1678, 1679, 1680, 1681, 1416, 2245, 1669, 1687,
+  // Shield extenders/boosters/hardeners (by damage type)/amplifiers/recharge & flux/remote
+  1549, 1548, 1692, 1693, 1694, 1695, 1696, 2246, 1552, 1554, 1689, 1688, 1690, 1691,
+  1551, 1550, 1547, 1553,
+  // Damage controls, weapon upgrades (turret/missile)
+  615, 645, 646, 648, 707, 706, 708, 2032, 2033,
+  // Tackle / EWAR
+  680, 683, 679, 1935, 1936, 1085,
+  // Sensor / targeting
+  669, 671, 673, 1583,
+  // Capacitor
+  659, 660, 1563, 1565, 1564,
+  // Propulsion
+  131, 542, 1086, 1088,
+  // Misc fitted consumable
+  1103,
+];
+
+// Resolves a list of ESI market_group_ids to the flat set of type_ids they contain
+// (leaf groups only carry types directly; the tree's non-leaf "parent" groups have an
+// empty types array and are simply not in this list). One ESI call per group_id —
+// there's no bulk endpoint — so this is run with modest concurrency, same pattern as
+// everything else in this file.
+async function fetchMarketGroupTypeIds(groupIds) {
+  const allTypeIds = new Set();
+  await mapWithConcurrency(groupIds, 10, async (groupId) => {
+    const { data } = await esiGet(`${ESI_BASE}/markets/groups/${groupId}/?datasource=tranquility`);
+    for (const typeId of data.types || []) allTypeIds.add(typeId);
+  });
+  return [...allTypeIds];
+}
+
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function esiGet(url, attempt = 1) {
@@ -262,6 +311,15 @@ function marginPct(buyAvg5, sellAvg5) {
 async function buildItemList() {
   if (ITEM_MODE === 'watchlist') {
     const items = { ...WATCHLIST, ...(SCAN_ALL ? CANDIDATES_PRICIER : {}) };
+    if (SCAN_ALL) {
+      console.log('Resolving Salvage + T1/meta module market groups from ESI...');
+      const extraTypeIds = await fetchMarketGroupTypeIds([...SALVAGE_GROUP_IDS, ...MODULE_GROUP_IDS]);
+      console.log(`Found ${extraTypeIds.length} type_ids across ${SALVAGE_GROUP_IDS.length + MODULE_GROUP_IDS.length} market groups. Looking up names...`);
+      const extraNames = await fetchNames(extraTypeIds);
+      for (const typeId of extraTypeIds) {
+        items[extraNames[typeId] || `type_${typeId}`] = typeId;
+      }
+    }
     return Object.entries(items).map(([name, typeId]) => ({ name, typeId }));
   }
 
