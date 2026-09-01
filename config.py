@@ -20,8 +20,12 @@ TABLE_PERIMETER_ORDERS_RAW = f"{PROJECT_ID}.{DATASET}.perimeter_orders_raw"
 TABLE_MY_ORDERS = f"{PROJECT_ID}.{DATASET}.my_orders"
 TABLE_WALLET_TRANSACTIONS = f"{PROJECT_ID}.{DATASET}.wallet_transactions"
 TABLE_WALLET_JOURNAL = f"{PROJECT_ID}.{DATASET}.wallet_journal"
-TABLE_NET_WORTH_HISTORY = f"{PROJECT_ID}.{DATASET}.net_worth_history"
 TABLE_ML_FEATURES = f"{PROJECT_ID}.{DATASET}.ml_features"  # created by features.py if missing
+# NOTE: there is no net_worth_history table (confirmed against live BigQuery
+# 2026-09-01, `bq ls` — not just schema.sql) and nothing writes one. kpi.py /
+# sizing.py compute cash + capital directly from wallet_journal / my_orders
+# instead, reusing the same SQL already proven in esi-oauth-service's
+# /report endpoint (wallet_capital, trading_pnl_daily reports).
 
 # --- Existing eve-trading pipeline (Cloud Run Jobs) ----------------------
 # CONFIRMED 2026-09-01: there is no local `daily_ops.js` — it never existed.
@@ -46,6 +50,16 @@ FRESHNESS_THRESHOLD_HOURS = 2
 # --- Fees (from Matej's actual buy/sell screenshots — re-confirm if rates change) ---
 BROKER_FEE_RATE = 0.01382
 SALES_TAX_RATE = 0.03375
+
+# --- Reference pricing (confirmed 2026-09-01) -----------------------------
+# Reference buy price = MAX(best buy across the WHOLE Jita solar system, best
+# buy in the Perimeter citadel) — explicitly NOT limited to a single
+# station/structure. "Jita" here means the full system (system_id below),
+# not just the Jita IV - Moon 4 NPC station recompute_top_of_book.sql
+# restricts to — Matej confirmed 2026-09-01 that station-only was wrong for
+# this app. Reference sell price = best sell in the Jita system only (that's
+# where Matej actually lists sells).
+JITA_SYSTEM_ID = 30000142  # EVE static data: "Jita" solar system
 
 # --- Step 2: evaluate open buy orders ------------------------------------
 MARGIN_FLOOR_PCT = 8.0          # below this -> CANCEL instead of REPRICE

@@ -18,38 +18,97 @@ addition — a density risk filter on top, using the SAME density formula as
 the existing risk-score rule, applied to *candidates* only (never to items
 we already hold an order on, which are handled entirely by step 2).
 
-TODO(Matej): column names (region_buy_max, station_sell_min, buy_volume,
-sell_volume, avg_daily_volume_14d, buy_order_count, sell_order_count) are
-assumed from the schema description, not verified against schema.sql.
+Rewritten 2026-09-01, verified against live BigQuery:
+- `market_snapshots` has no `region_buy_max` / `station_sell_min` /
+  `buy_volume` / `sell_volume` / `buy_order_count` / `sell_order_count`
+  columns — those never existed. Top-of-book price, order counts and depth
+  now come straight from the raw order book (market_orders_raw +
+  perimeter_orders_raw), same approach as eval/orders.py.
+- Confirmed 2026-09-01: pooling Jita system + Perimeter applies everywhere
+  in this file, not just the buy price — buy_volume/sell_volume/
+  buy_order_count/sell_order_count (depth cap + density) now sum BOTH
+  markets too, no single-structure limit on either. Only sell_min stays
+  Jita-only, per the separate, earlier-confirmed fact that Matej actually
+  lists his sells at Jita, not Perimeter.
+- `net_worth_history` doesn't exist either — current cash now comes from
+  eval/kpi.get_current_cash (wallet_journal), same as the dashboard's
+  headline numbers.
 """
 
 import pandas as pd
 
 import config
-from eval import bq
+from eval import bq, kpi
 from eval.orders import margin_pct
 
 CANDIDATES_SQL = f"""
+with jita_latest as (
+  select max(scan_date) as d from `{config.TABLE_MARKET_ORDERS_RAW}`
+),
+jita_system as (
+  select r.type_id, r.is_buy_order, r.price, r.volume_remain
+  from `{config.TABLE_MARKET_ORDERS_RAW}` r, jita_latest l
+  where r.scan_date = l.d and r.system_id = {config.JITA_SYSTEM_ID}
+),
+jita_buy as (
+  select type_id, max(price) as jita_buy_max
+  from jita_system where is_buy_order group by type_id
+),
+jita_sell as (
+  select type_id, min(price) as jita_sell_min
+  from jita_system where not is_buy_order group by type_id
+),
+jita_depth as (
+  select type_id,
+    sum(if(is_buy_order, volume_remain, 0)) as jita_buy_volume,
+    sum(if(not is_buy_order, volume_remain, 0)) as jita_sell_volume,
+    countif(is_buy_order) as jita_buy_orders,
+    countif(not is_buy_order) as jita_sell_orders
+  from jita_system group by type_id
+),
+perim_latest as (
+  select max(scan_date) as d from `{config.TABLE_PERIMETER_ORDERS_RAW}`
+),
+perim_book as (
+  select r.type_id, r.is_buy_order, r.price, r.volume_remain
+  from `{config.TABLE_PERIMETER_ORDERS_RAW}` r, perim_latest l
+  where r.scan_date = l.d
+),
+perim_buy as (
+  select type_id, max(price) as perim_buy_max
+  from perim_book where is_buy_order group by type_id
+),
+perim_depth as (
+  select type_id,
+    sum(if(is_buy_order, volume_remain, 0)) as perim_buy_volume,
+    sum(if(not is_buy_order, volume_remain, 0)) as perim_sell_volume,
+    countif(is_buy_order) as perim_buy_orders,
+    countif(not is_buy_order) as perim_sell_orders
+  from perim_book group by type_id
+),
+snapshot as (
+  select type_id, item_name, avg_daily_volume_14d
+  from `{config.TABLE_MARKET_SNAPSHOTS}`
+  qualify row_number() over (partition by type_id order by scanned_at desc) = 1
+)
 select
-    type_id,
-    item_name,
-    region_buy_max as buy_max,
-    station_sell_min as sell_min,
-    buy_volume,
-    sell_volume,
-    avg_daily_volume_14d,
-    buy_order_count,
-    sell_order_count
-from `{config.TABLE_MARKET_SNAPSHOTS}`
-where scan_date = current_date()
-  and avg_daily_volume_14d > 0
-"""
-
-CASH_SQL = f"""
-select cash
-from `{config.TABLE_NET_WORTH_HISTORY}`
-order by run_date desc
-limit 1
+  s.type_id, s.item_name,
+  greatest(coalesce(jb.jita_buy_max, 0), coalesce(pb.perim_buy_max, 0)) as buy_max,
+  js.jita_sell_min as sell_min,
+  coalesce(d.jita_buy_volume, 0) + coalesce(pd.perim_buy_volume, 0) as buy_volume,
+  coalesce(d.jita_sell_volume, 0) + coalesce(pd.perim_sell_volume, 0) as sell_volume,
+  coalesce(d.jita_buy_orders, 0) + coalesce(pd.perim_buy_orders, 0) as buy_order_count,
+  coalesce(d.jita_sell_orders, 0) + coalesce(pd.perim_sell_orders, 0) as sell_order_count,
+  s.avg_daily_volume_14d
+from snapshot s
+left join jita_buy jb using (type_id)
+left join jita_sell js using (type_id)
+left join jita_depth d using (type_id)
+left join perim_buy pb using (type_id)
+left join perim_depth pd using (type_id)
+where s.avg_daily_volume_14d > 0
+  and js.jita_sell_min is not null
+  and (jb.jita_buy_max is not null or pb.perim_buy_max is not null)
 """
 
 
@@ -62,10 +121,7 @@ def density_band(density_per_1000: float) -> str:
 
 
 def compute_available_capital(client, orders_eval: pd.DataFrame) -> float:
-    cash_row = bq.query_df(client, CASH_SQL)
-    if cash_row.empty:
-        raise RuntimeError("net_worth_history has no rows — run step 4 / daily_ops.js at least once first.")
-    cash = float(cash_row.iloc[0]["cash"])
+    cash = kpi.get_current_cash(client)
 
     freed = 0.0
     extra_escrow = 0.0

@@ -116,13 +116,19 @@ def _table_or_empty(df: pd.DataFrame, empty_msg: str) -> str:
 
 
 def _net_worth_chart(trend_df: pd.DataFrame) -> str:
+    if trend_df.empty:
+        return '<div class="empty-note">Zatím žádná historie (wallet_transactions/wallet_journal jsou prázdné — spusť refresh alespoň jednou).</div>'
+    # trend_df is daily wallet CASH (balance_eod) — there is no net_worth_history
+    # table, so there's no clean historical series of locked (escrow) capital to
+    # stack on top of it (my_orders is a live snapshot, not a daily history).
+    # Today's locked ISK is shown separately in the headline cards instead.
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=trend_df["run_date"], y=trend_df["cash"], name="Cash", stackgroup="one"))
-    fig.add_trace(go.Scatter(x=trend_df["run_date"], y=trend_df["locked_buy"], name="Locked (buy)", stackgroup="one"))
-    fig.add_trace(go.Scatter(x=trend_df["run_date"], y=trend_df["locked_sell"], name="Locked (sell)", stackgroup="one"))
-    fig.add_trace(go.Scatter(x=trend_df["run_date"], y=trend_df["total"], name="Total", line=dict(color="#e8e8e8", width=2), stackgroup=None))
+    fig.add_trace(go.Scatter(
+        x=trend_df["day"], y=trend_df["balance_eod"], name="Cash (EOD)",
+        line=dict(color="#e8e8e8", width=2), fill="tozeroy",
+    ))
 
-    default_start = trend_df["run_date"].max() - pd.Timedelta(days=config.DASHBOARD_DEFAULT_WINDOW_DAYS)
+    default_start = trend_df["day"].max() - pd.Timedelta(days=config.DASHBOARD_DEFAULT_WINDOW_DAYS)
     fig.update_layout(
         template="plotly_dark",
         height=380,
@@ -134,23 +140,34 @@ def _net_worth_chart(trend_df: pd.DataFrame) -> str:
                 dict(count=90, label="90d", step="day", stepmode="backward"),
                 dict(step="all", label="Vše"),
             ]),
-            range=[default_start, trend_df["run_date"].max()],
+            range=[default_start, trend_df["day"].max()],
         ),
         legend=dict(orientation="h"),
+        annotations=[dict(
+            text="Jen cash — neobsahuje ISK zamrzlé v otevřených buy orderech (viz karta nahoře)",
+            xref="paper", yref="paper", x=0, y=1.08, showarrow=False,
+            font=dict(size=11, color="#8a8f98"),
+        )],
     )
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
 
 def _profit_chart(trend_df: pd.DataFrame) -> str:
-    # Weekly realized (from total delta as a proxy until wallet_journal-based
-    # realized series is wired in — see kpi.py TODO) vs. unrealized (locked value).
-    weekly = trend_df.set_index("run_date").resample("W").last().reset_index()
-    weekly["realized_proxy"] = weekly["total"].diff()
-    weekly["unrealized"] = weekly["locked_buy"] + weekly["locked_sell"]
+    if trend_df.empty:
+        return '<div class="empty-note">Zatím žádná historie realizovaného zisku.</div>'
+    # Daily realized P&L (wallet_transactions netted against fees from
+    # wallet_journal, same query as esi-oauth-service's trading_pnl_daily
+    # report) — a cash-based approximation, not true lot-accounted P&L (see
+    # kpi.py docstring). Cumulative line added for trend feel.
+    df = trend_df.copy()
+    df["cumulative_pnl"] = df["net_cash_pnl"].cumsum()
 
-    fig = make_subplots(specs=[[{"secondary_y": False}]])
-    fig.add_trace(go.Bar(x=weekly["run_date"], y=weekly["realized_proxy"], name="Δ Net worth (weekly)"))
-    fig.add_trace(go.Bar(x=weekly["run_date"], y=weekly["unrealized"], name="Locked (unrealized)"))
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=df["day"], y=df["net_cash_pnl"], name="Realizovaný P&L (denně)"), secondary_y=False)
+    fig.add_trace(go.Scatter(
+        x=df["day"], y=df["cumulative_pnl"], name="Kumulativně",
+        line=dict(color="#4ade80", width=2),
+    ), secondary_y=True)
     fig.update_layout(
         template="plotly_dark",
         height=340,
