@@ -147,9 +147,23 @@ def rank_new_candidates(client, available_capital: float, exclude_type_ids: set)
     df["risk_band"] = df["density_per_1000"].apply(density_band)
     df["margin_pct"] = df.apply(lambda r: margin_pct(r["buy_max"], r["sell_min"]), axis=1)
 
-    # Filter: margin floor + exclude high risk from NEW candidates
-    # (existing positions are governed by step 2 only, not touched here).
-    df = df[(df["margin_pct"] >= config.MARGIN_FLOOR_PCT) & (df["risk_band"] != "high")]
+    # Filter: margin floor + ceiling, min liquidity, exclude high risk from
+    # NEW candidates (existing positions are governed by step 2 only, not
+    # touched here). The floor/ceiling/order-count filters mirror the same
+    # blunt sanity checks bigquery/recompute_top_of_book.sql already uses —
+    # confirmed 2026-09-01 needed here too after a real run surfaced margins
+    # like 46071%/9954%/9076% on near-zero-liquidity items (Armor
+    # Reinforcement Charge, Shadow Tungsten Charge S, Arch Angel EMP M) —
+    # classic reference-price artifacts on a thin book, not real
+    # opportunities. MARGIN_CEILING_PCT / MIN_ORDERS_PER_SIDE live in
+    # config.py, same as every other threshold.
+    df = df[
+        (df["margin_pct"] >= config.MARGIN_FLOOR_PCT)
+        & (df["margin_pct"] <= config.MARGIN_CEILING_PCT)
+        & (df["buy_order_count"] >= config.MIN_ORDERS_PER_SIDE)
+        & (df["sell_order_count"] >= config.MIN_ORDERS_PER_SIDE)
+        & (df["risk_band"] != "high")
+    ]
 
     df["profit_per_unit"] = df["sell_min"] * (1 - config.BROKER_FEE_RATE - config.SALES_TAX_RATE) \
         - df["buy_max"] * (1 + config.BROKER_FEE_RATE)

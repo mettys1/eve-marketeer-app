@@ -71,6 +71,12 @@ PER_POSITION_PCT = 0.20
 CAPITAL_RESERVE_PCT = 0.01      # kept aside, never spent on new buy orders
 DEPTH_CAP_FRACTION = 0.15       # of min(buy.volume, sell.volume)
 
+# Sanity filters for NEW candidates, added 2026-09-01 after a real run
+# surfaced 9000%+ "margins" on near-zero-liquidity items — same blunt
+# safeguards bigquery/recompute_top_of_book.sql already uses.
+MARGIN_CEILING_PCT = 100.0      # above this -> reference-price artifact, not a real trade
+MIN_ORDERS_PER_SIDE = 3         # below this on either buy or sell side -> too thin to trust
+
 # Density risk bands (density * 1000, i.e. "per 1000 units of volume")
 DENSITY_LOW_MAX = 0.2
 DENSITY_MEDIUM_MAX = 2.0

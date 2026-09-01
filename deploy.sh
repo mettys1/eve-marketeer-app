@@ -101,12 +101,21 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 echo "== Step 9: create the Cloud Run Job (or update it, if this is a re-run) =="
 # ITEM_MODE=top_volume scans every type_id trading in the region (19k+ — Cloud Run's own first
 # run told us), ranks by real volume, keeps the top TOP_N_ITEMS — see poller.js's header comment.
+# TOP_N_ITEMS raised 750 -> 4000 on 2026-09-01 (Matej: widen coverage as much as reasonable) —
+# the ranking pass already walks the full 19k+ region regardless of this number, so the extra
+# cost is only in the order-book-fetch phase (more items x more paginated /orders/ calls) and in
+# rawOrderRows held in memory until the end-of-run BigQuery insert. FORCE_INCLUDE_HELD_ORDERS
+# (poller.js default "true", no env var needed here) additionally guarantees Matej's own open
+# positions are scanned even on a day they'd otherwise fall outside the top 4000 by volume.
 # --memory bumped to 2Gi after the first attempt OOM'd (was caching full history for all 19k
 # items during ranking, not just the aggregate — fixed in poller.js, but keeping the extra
-# headroom). NODE_OPTIONS caps V8's heap below the container limit, leaving room for non-heap
-# overhead (Node itself, native buffers) so we get a clean JS OOM instead of a raw SIGKILL if
-# something does grow unexpectedly.
-JOB_ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},ITEM_MODE=top_volume,TOP_N_ITEMS=750,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6,NODE_OPTIONS=--max-old-space-size=1536"
+# headroom) — bumped again to 3Gi alongside the TOP_N_ITEMS raise, since a wider kept-set means
+# more raw order rows held in memory before the final BigQuery write. Watch actual job memory/
+# duration after deploying this and adjust further if needed — this is a reasoned guess, not a
+# measured number. NODE_OPTIONS caps V8's heap below the container limit, leaving room for
+# non-heap overhead (Node itself, native buffers) so we get a clean JS OOM instead of a raw
+# SIGKILL if something does grow unexpectedly.
+JOB_ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${DATASET},ITEM_MODE=top_volume,TOP_N_ITEMS=4000,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6,NODE_OPTIONS=--max-old-space-size=2560"
 gcloud run jobs create "$JOB_NAME" \
   --image="$IMAGE" \
   --region="$REGION" \
@@ -114,7 +123,7 @@ gcloud run jobs create "$JOB_NAME" \
   --set-env-vars="$JOB_ENV_VARS" \
   --max-retries=1 \
   --task-timeout=3600 \
-  --memory=2Gi \
+  --memory=3Gi \
   --cpu=1 \
   || gcloud run jobs update "$JOB_NAME" \
        --image="$IMAGE" \
@@ -123,7 +132,7 @@ gcloud run jobs create "$JOB_NAME" \
        --set-env-vars="$JOB_ENV_VARS" \
        --max-retries=1 \
        --task-timeout=3600 \
-       --memory=2Gi \
+       --memory=3Gi \
        --cpu=1
 
 echo "== Step 10: test-run it once, watch it go =="

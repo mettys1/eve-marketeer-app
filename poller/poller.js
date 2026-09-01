@@ -11,9 +11,17 @@
  * Item universe (ITEM_MODE):
  *   "top_volume" (default) — fetches every type_id currently trading in the region
  *     (/markets/{region}/types/), ranks all of them by average daily trade volume over the
- *     last HISTORY_DAYS days (one ESI history call per type_id — this is the expensive pass),
- *     and keeps the top TOP_N_ITEMS. This is what actually runs on the schedule now: broad,
- *     real-liquidity-based coverage instead of a hand-picked list.
+ *     last HISTORY_DAYS days (one ESI history call per type_id — this is the expensive pass —
+ *     and it touches the WHOLE region regardless of TOP_N_ITEMS, since ranking has to happen
+ *     before the cutoff), and keeps the top TOP_N_ITEMS. This is what actually runs on the
+ *     schedule now: broad, real-liquidity-based coverage instead of a hand-picked list.
+ *
+ *     On top of the TOP_N_ITEMS cutoff, this mode also force-includes every type_id currently
+ *     held in Matej's own open orders (`my_orders`, deduped/filtered the same way eval/orders.py
+ *     does) — added 2026-09-01, see FORCE_INCLUDE_HELD_ORDERS below. Confirmed with Matej: a
+ *     ranking cutoff, however wide, can never fully guarantee that something he's actually
+ *     trading right now stays in it every single day, so this closes that gap unconditionally
+ *     instead of relying on TOP_N_ITEMS width alone.
  *   "watchlist" — falls back to the original hand-picked WATCHLIST (+ CANDIDATES_PRICIER if
  *     SCAN_ALL=true). Kept as an escape hatch: cheap, fast, useful if the region types/ranking
  *     pass ever misbehaves or you just want the old fixed 52/84-item behavior back.
@@ -22,7 +30,17 @@
  *   GCP_PROJECT_ID          (required) — BigQuery project to write into
  *   BQ_DATASET              (default: eve_jita_scanner)
  *   ITEM_MODE               (default: "top_volume") — "top_volume" | "watchlist"
- *   TOP_N_ITEMS             (default: 750) — only used when ITEM_MODE=top_volume
+ *   TOP_N_ITEMS             (default: 4000, was 750) — only used when ITEM_MODE=top_volume.
+ *                            Raised 2026-09-01 per Matej — the ranking pass already walks the
+ *                            whole region regardless of this number, so widening it only grows
+ *                            the (cheaper) order-book-fetch phase, not the expensive ranking
+ *                            pass. Trade-off: more market_orders_raw rows/day and a longer scan
+ *                            (SCAN_CONCURRENCY-bound) — watch Cloud Run job duration/cost and
+ *                            BigQuery storage growth after this change; task-timeout (3600s) and
+ *                            memory (1Gi, deploy.sh) may need another bump if 4000 turns out to
+ *                            still be too small or too slow.
+ *   FORCE_INCLUDE_HELD_ORDERS (default: "true") — only used when ITEM_MODE=top_volume; set
+ *                            "false" to disable the my_orders force-include described above.
  *   SCAN_ALL                (default: "false") — only used when ITEM_MODE=watchlist; set "true"
  *                            to also scan the 32 pricier-ships/minerals candidates
  *   HISTORY_DAYS            (default: 14) — turnover lookback window (also the ranking window
@@ -58,7 +76,8 @@ const MAX_TYPE_PAGES = 50; // safety cap on paginated /markets/{region}/types/ f
 const PROJECT_ID = process.env.GCP_PROJECT_ID;
 const DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 const ITEM_MODE = (process.env.ITEM_MODE || 'top_volume').toLowerCase();
-const TOP_N_ITEMS = Number(process.env.TOP_N_ITEMS) || 750;
+const TOP_N_ITEMS = Number(process.env.TOP_N_ITEMS) || 4000;
+const FORCE_INCLUDE_HELD_ORDERS = (process.env.FORCE_INCLUDE_HELD_ORDERS || 'true').toLowerCase() !== 'false';
 const SCAN_ALL = (process.env.SCAN_ALL || 'false').toLowerCase() === 'true';
 const HISTORY_DAYS = Number(process.env.HISTORY_DAYS) || 14;
 const WRITE_RAW_ORDERS = (process.env.WRITE_RAW_ORDERS || 'true').toLowerCase() !== 'false';
@@ -308,7 +327,25 @@ function marginPct(buyAvg5, sellAvg5) {
   return (sellNet - buyCost) / buyCost * 100;
 }
 
-async function buildItemList() {
+// Type_ids currently held in Matej's own open orders — force-included into top_volume mode
+// regardless of volume rank (see FORCE_INCLUDE_HELD_ORDERS in the header comment). Same
+// append-only-table dedupe (latest row per order_id) and is_open handling as eval/orders.py's
+// OPEN_ORDERS_SQL: NULL is_open means a legacy pre-fix row, treated as still open.
+async function fetchHeldTypeIds(bq) {
+  const sql = `
+    select distinct type_id, item_name
+    from (
+      select type_id, item_name, order_id, is_open,
+             row_number() over (partition by order_id order by scanned_at desc) as rn
+      from \`${PROJECT_ID}.${DATASET}.my_orders\`
+    )
+    where rn = 1 and (is_open is null or is_open = true)
+  `;
+  const [rows] = await bq.query({ query: sql });
+  return rows.map(r => ({ typeId: r.type_id, name: r.item_name }));
+}
+
+async function buildItemList(bq) {
   if (ITEM_MODE === 'watchlist') {
     const items = { ...WATCHLIST, ...(SCAN_ALL ? CANDIDATES_PRICIER : {}) };
     if (SCAN_ALL) {
@@ -328,9 +365,28 @@ async function buildItemList() {
   console.log(`Region has ${allTypeIds.length} types with active orders. Ranking by avg daily volume (last ${HISTORY_DAYS}d, concurrency ${RANK_CONCURRENCY})...`);
   const ranked = await rankByVolume(allTypeIds, HISTORY_DAYS, RANK_CONCURRENCY);
   const top = ranked.slice(0, TOP_N_ITEMS).map(r => r.typeId);
-  console.log(`Looking up names for top ${top.length} items...`);
-  const names = await fetchNames(top);
-  return top.map(typeId => ({ name: names[typeId] || `type_${typeId}`, typeId }));
+
+  const combined = new Map(top.map(typeId => [typeId, null])); // name filled in below
+  if (FORCE_INCLUDE_HELD_ORDERS) {
+    try {
+      const held = await fetchHeldTypeIds(bq);
+      let added = 0;
+      for (const { typeId, name } of held) {
+        if (!combined.has(typeId)) added++;
+        combined.set(typeId, name || null);
+      }
+      console.log(`Force-including ${held.length} type_ids currently held in my_orders (${added} were outside the top ${TOP_N_ITEMS} by volume).`);
+    } catch (err) {
+      // Non-fatal: don't let a my_orders hiccup (e.g. table momentarily stale/empty) take down
+      // the whole scan — top_volume coverage alone still runs.
+      console.log(`WARNING: could not fetch held order type_ids for force-include, continuing without it: ${err.message}`);
+    }
+  }
+
+  const allIds = [...combined.keys()];
+  console.log(`Looking up names for ${allIds.length} items...`);
+  const names = await fetchNames(allIds);
+  return allIds.map(typeId => ({ name: combined.get(typeId) || names[typeId] || `type_${typeId}`, typeId }));
 }
 
 async function main() {
@@ -338,7 +394,7 @@ async function main() {
   const scannedAt = new Date();
   const scanDate = scannedAt.toISOString().slice(0, 10);
 
-  const itemList = await buildItemList();
+  const itemList = await buildItemList(bq);
   console.log(`Scanning ${itemList.length} items (mode=${ITEM_MODE}, region ${REGION_ID}, concurrency ${SCAN_CONCURRENCY}) at ${scannedAt.toISOString()}`);
 
   const snapshotRows = [];
