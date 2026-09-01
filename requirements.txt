@@ -1,0 +1,4 @@
+google-cloud-bigquery>=3.20
+pandas>=2.0
+db-dtypes>=1.2   # required by bigquery.to_dataframe()
+plotly>=5.20
