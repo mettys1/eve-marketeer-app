@@ -14,12 +14,27 @@ instead of silently trusting exit code 0.
 Requires the `gcloud` CLI installed and authenticated (`gcloud auth login`)
 with access to config.PROJECT_ID — same requirement the existing
 refresh_*.sh shell scripts already have.
+
+Fixed 2026-09-01 — Windows: the Cloud SDK installs `gcloud` as `gcloud.cmd`,
+a batch file, not a `.exe`. `subprocess.Popen([...], shell=False)` (the
+default) calls Windows' CreateProcess directly, which has no notion of
+PATHEXT/file-association resolution — it looks for a literal `gcloud`/
+`gcloud.exe` and fails with `FileNotFoundError: [WinError 2]` even though
+`gcloud version` works fine in the same terminal. `shell=True` routes the
+command through `cmd.exe`, which *does* resolve `.cmd` via PATHEXT, same as
+typing `gcloud ...` at a prompt. Safe here since every argument is a fixed
+string from config, never user input. Linux/Cloud Shell (where `gcloud` is
+already a real executable/shell script) is unaffected either way, but this
+only enables shell=True on Windows to avoid changing behavior there.
 """
 
+import platform
 import subprocess
 
 import config
 from eval import bq
+
+_USE_SHELL = platform.system() == "Windows"
 
 
 def _execute_job(job_name: str) -> subprocess.Popen:
@@ -33,6 +48,7 @@ def _execute_job(job_name: str) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        shell=_USE_SHELL,
     )
 
 
