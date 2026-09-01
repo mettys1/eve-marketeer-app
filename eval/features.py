@@ -8,8 +8,12 @@ Row = density snapshot at evaluation time + (once known) whether that item's
 order filled or had to be repriced/cancelled — the label for a future model.
 Written append-only; never read here.
 
-TODO(Matej): confirm column names once schema.sql is checked, same caveat as
-other modules.
+Fixed 2026-09-01: `insert_rows_json` needs plain JSON-serializable types —
+values pulled off a pandas itertuples() row (type_id, margin_pct,
+density_per_1000, reprice_cost_so_far) come back as numpy.int64/float64,
+which json.dumps chokes on ("Object of type int64 is not JSON
+serializable"). Every value below is now cast to a native Python
+int/float/None before being handed to the client.
 """
 
 from datetime import date
@@ -32,6 +36,14 @@ SCHEMA = [
 ]
 
 
+def _int(v):
+    return None if v is None or pd.isna(v) else int(v)
+
+
+def _float(v):
+    return None if v is None or pd.isna(v) else float(v)
+
+
 def ensure_table(client) -> None:
     table_ref = bigquery.TableReference.from_string(config.TABLE_ML_FEATURES)
     try:
@@ -50,24 +62,24 @@ def log_features(client, orders_eval: pd.DataFrame, candidates: pd.DataFrame) ->
     for row in orders_eval.itertuples():
         rows.append({
             "scan_date": today,
-            "type_id": row.type_id,
+            "type_id": _int(row.type_id),
             "item_name": row.item_name,
             "density_per_1000": None,  # not computed for existing orders in step 2
             "risk_band": None,
             "margin_pct": None,
             "action": row.action,
-            "reprice_cost_so_far": getattr(row, "reprice_cost_so_far", None),
+            "reprice_cost_so_far": _float(getattr(row, "reprice_cost_so_far", None)),
             "filled": None,
         })
 
     for row in candidates.itertuples():
         rows.append({
             "scan_date": today,
-            "type_id": row.type_id,
+            "type_id": _int(row.type_id),
             "item_name": row.item_name,
-            "density_per_1000": row.density_per_1000,
+            "density_per_1000": _float(row.density_per_1000),
             "risk_band": row.risk_band,
-            "margin_pct": row.margin_pct,
+            "margin_pct": _float(row.margin_pct),
             "action": "NEW",
             "reprice_cost_so_far": None,
             "filled": None,
