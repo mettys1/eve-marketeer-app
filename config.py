@@ -23,12 +23,21 @@ TABLE_WALLET_JOURNAL = f"{PROJECT_ID}.{DATASET}.wallet_journal"
 TABLE_NET_WORTH_HISTORY = f"{PROJECT_ID}.{DATASET}.net_worth_history"
 TABLE_ML_FEATURES = f"{PROJECT_ID}.{DATASET}.ml_features"  # created by features.py if missing
 
-# --- Existing daily_ops.js pipeline --------------------------------------
-# TODO(Matej): point this at your real ops/ folder (the one with daily_ops.js
-# and package.json). Left relative-looking on purpose so it's obviously a
-# placeholder, not a guess at your real path.
-OPS_DIR = Path(r"C:\Users\Matej\Documents\GitHub\<eve-trading-repo>\ops")
-DAILY_OPS_SCRIPT = "daily_ops.js"
+# --- Existing eve-trading pipeline (Cloud Run Jobs) ----------------------
+# CONFIRMED 2026-09-01: there is no local `daily_ops.js` — it never existed.
+# The refresh step is 4 independent Cloud Run Jobs (source: refresh_all.sh,
+# refresh_jita.sh, refresh_my_orders.sh, refresh_perimeter.sh,
+# refresh_wallet.sh, all already in THIS repo's root). refresh.py invokes
+# them the same way those scripts do: `gcloud run jobs execute <job>
+# --region=... --project=... --wait`, in parallel, exactly like
+# refresh_all.sh.
+GCLOUD_REGION = "europe-west1"
+CLOUD_RUN_JOBS = [
+    "eve-jita-poller",        # Jita market scan -> market_snapshots / market_orders_raw
+    "esi-perimeter-poller",   # Perimeter citadel scan -> perimeter_orders_raw
+    "esi-my-orders-poller",   # Matej's open orders (ESI, needs esi-oauth-service login) -> my_orders
+    "esi-wallet-poller",      # wallet transactions + journal (ESI) -> wallet_transactions / wallet_journal
+]
 
 # How old MAX(scanned_at) is allowed to be before we trust it as "fresh"
 # without re-running the refresh. Matches the freshness rule in the skill.

@@ -1,10 +1,19 @@
 """
 Step 1 — Refresh.
 
-Deliberately does NOT reimplement scanning/reprice-check/sell-suggestions/net
-worth calc — daily_ops.js already does all four and is the source of truth.
-This just calls it as a subprocess and proves (via freshness check) that it
-actually produced new data, instead of silently trusting exit code 0.
+There is no local `daily_ops.js` (confirmed 2026-09-01 — it never existed;
+the repo's own README/refresh_all.sh were the source of truth all along).
+The refresh is 4 independent Cloud Run Jobs, invoked with `gcloud run jobs
+execute --wait`, in parallel, exactly like this repo's own refresh_all.sh
+does. This module deliberately does NOT reimplement scanning/reprice-check/
+sell-suggestions/net worth calc — those Cloud Run Jobs already do it and are
+the source of truth. This just launches them and proves (via freshness
+check against market_snapshots) that they actually produced new data,
+instead of silently trusting exit code 0.
+
+Requires the `gcloud` CLI installed and authenticated (`gcloud auth login`)
+with access to config.PROJECT_ID — same requirement the existing
+refresh_*.sh shell scripts already have.
 """
 
 import subprocess
@@ -13,27 +22,47 @@ import config
 from eval import bq
 
 
-def run_refresh(client) -> None:
-    before = bq.last_scan_time(client)
-
-    result = subprocess.run(
-        ["node", config.DAILY_OPS_SCRIPT],
-        cwd=str(config.OPS_DIR),
-        capture_output=True,
+def _execute_job(job_name: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            "gcloud", "run", "jobs", "execute", job_name,
+            f"--region={config.GCLOUD_REGION}",
+            f"--project={config.PROJECT_ID}",
+            "--wait",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
-    if result.returncode != 0:
+
+def run_refresh(client) -> None:
+    before = bq.last_scan_time(client)
+
+    # Launch all 4 jobs in parallel — they're independent, same as
+    # refresh_all.sh. Total time = slowest job (usually eve-jita-poller),
+    # not the sum of all four.
+    procs = {job: _execute_job(job) for job in config.CLOUD_RUN_JOBS}
+
+    failures = []
+    for job, proc in procs.items():
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            failures.append(
+                f"--- {job} (exit {proc.returncode}) ---\n"
+                f"stdout:\n{stdout}\nstderr:\n{stderr}"
+            )
+
+    if failures:
         raise RuntimeError(
-            f"daily_ops.js exited {result.returncode}.\n"
-            f"--- stdout ---\n{result.stdout}\n"
-            f"--- stderr ---\n{result.stderr}"
+            "One or more Cloud Run Jobs failed during refresh:\n\n"
+            + "\n\n".join(failures)
         )
 
     after = bq.last_scan_time(client)
     if after is None or (before is not None and after <= before):
         raise RuntimeError(
-            "daily_ops.js exited 0 but MAX(scanned_at) did not advance "
+            "All refresh jobs exited 0 but MAX(scanned_at) did not advance "
             f"(before={before}, after={after}). Refresh did not actually "
             "write new data — check Cloud Run job logs, don't proceed."
         )

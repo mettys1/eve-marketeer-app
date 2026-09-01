@@ -1,9 +1,20 @@
-node_modules/
-*.log
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Dashboard output (regenerated every run, not source)
+eval/output/
+
+# Credentials — never commit these if/when they show up
+service-account*.json
+credentials*.json
+*.env
 .env
+
+# OS/editor cruft
 .DS_Store
-scan-latest.json
-esi-auth/.credentials.json
-my_orders.csv
-perimeter_orders_raw.csv
-perimeter_top_of_book.csv
+.vscode/
+.idea/

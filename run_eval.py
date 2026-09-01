@@ -6,7 +6,7 @@ run_eval.py — single entry point for the daily EVE market evaluation.
 Steps (in order — the order matters, see eval/sizing.py docstring for why
 step 3 must come after step 2):
 
-  1. refresh    -> eval/refresh.py    (subprocess: daily_ops.js, freshness-checked)
+  1. refresh    -> eval/refresh.py    (gcloud run jobs execute x4, parallel, freshness-checked)
   2. orders     -> eval/orders.py     (existing buy orders: REPRICE / CANCEL)
   3. sizing     -> eval/sizing.py     (new buy order candidates, first-in-line)
   4. kpi        -> eval/kpi.py        (headline + net worth trend)
