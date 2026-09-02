@@ -112,6 +112,16 @@ where s.avg_daily_volume_14d > 0
 """
 
 
+def price_tier(buy_price: float) -> str:
+    """Display-only price bucket (added 2026-09-02) — see config.py's
+    PRICE_TIER_* comment. Does not affect ranking, filtering, or sizing."""
+    if buy_price < config.PRICE_TIER_CHEAP_MAX:
+        return "levné"
+    if buy_price < config.PRICE_TIER_MID_MAX:
+        return "střední"
+    return "drahé"
+
+
 def density_band(density_per_1000: float) -> str:
     if density_per_1000 <= config.DENSITY_LOW_MAX:
         return "low"
@@ -199,6 +209,7 @@ def rank_new_candidates(client, available_capital: float, exclude_type_ids: set)
             "risk_band": row.risk_band,
             "density_per_1000": round(row.density_per_1000, 3),
             "est_cost": round(cost, 0),
+            "price_tier": price_tier(row.buy_max),
         })
 
     result = pd.DataFrame(rows)

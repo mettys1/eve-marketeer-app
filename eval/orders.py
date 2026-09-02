@@ -11,7 +11,15 @@ Design (agreed with Matej):
   both count in full.
 - new_price = reference_buy_max + REPRICE_TICK
 - margin recomputed at new_price using current sell.min reference (Jita
-  system only — that's where Matej actually lists sells)
+  system only — that's where Matej actually lists sells), via
+  reprice_margin_pct() — NOT margin_pct(). Added 2026-09-02: margin_pct()
+  assumes both legs are brand-new orders (full BROKER_FEE_RATE on the buy),
+  which overstates the real cost of repricing an order that already exists.
+  reprice_margin_pct() uses the actual, exactly-computed reprice fee for
+  THIS order's specific placed_price -> new_price delta (see config.py's
+  REPRICE_FLAT_FEE / REPRICE_SCC_RATE_* — derived + verified against
+  Matej's live wallet journal) on the buy leg, full fees on the (not yet
+  placed) sell leg.
     - margin >= MARGIN_FLOOR_PCT -> REPRICE
     - margin <  MARGIN_FLOOR_PCT -> CANCEL (chasing would erode profit
       below the floor — this is the actual "does it still pay to chase"
@@ -92,7 +100,39 @@ where coalesce(is_buy_order, false)
 
 
 def margin_pct(buy_price: float, sell_price: float) -> float:
+    """Round-trip margin assuming BOTH legs are brand-new orders (full
+    BROKER_FEE_RATE on the buy, full BROKER_FEE_RATE+SALES_TAX_RATE on the
+    sell). Correct for eval/sizing.py's new candidates — wrong for step 2's
+    existing-order reprice decision, which uses reprice_margin_pct() below
+    instead (added 2026-09-02, see config.py's REPRICE_* comment)."""
     buy_cost = buy_price * (1 + config.BROKER_FEE_RATE)
+    sell_net = sell_price * (1 - config.BROKER_FEE_RATE - config.SALES_TAX_RATE)
+    return (sell_net - buy_cost) / buy_cost * 100.0
+
+
+def buy_reprice_fee(new_price: float, placed_price: float, qty: float) -> float:
+    """Real ISK cost of repricing an EXISTING buy order upward at Perimeter
+    (flat relist fee + SCC surcharge) — see config.py's REPRICE_FLAT_FEE /
+    REPRICE_SCC_RATE_* comment for the derivation and verification against
+    Matej's live wallet journal. `delta` is clamped at 0 because a buy
+    reprice only ever moves the price up (chasing the top of book)."""
+    delta = max(0.0, new_price - placed_price)
+    return (
+        config.REPRICE_FLAT_FEE
+        + config.REPRICE_SCC_RATE_VALUE * (new_price * qty)
+        + config.REPRICE_SCC_RATE_DELTA * (delta * qty)
+    )
+
+
+def reprice_margin_pct(new_price: float, placed_price: float, sell_price: float, qty: float) -> float:
+    """Net margin %% for step 2's actual decision: REPRICE an existing buy
+    order (real incremental reprice cost, computed exactly from this order's
+    own placed_price -> new_price delta — no guessing/averaging) vs. a
+    brand-new sell order on the other leg (full BROKER_FEE_RATE +
+    SALES_TAX_RATE — that leg hasn't been placed yet, so it isn't a reprice
+    at all). Compare against config.MARGIN_FLOOR_PCT, same as margin_pct()."""
+    fee_per_unit = buy_reprice_fee(new_price, placed_price, qty) / qty
+    buy_cost = new_price + fee_per_unit
     sell_net = sell_price * (1 - config.BROKER_FEE_RATE - config.SALES_TAX_RATE)
     return (sell_net - buy_cost) / buy_cost * 100.0
 
@@ -115,7 +155,7 @@ def evaluate_open_orders(client) -> pd.DataFrame:
             continue
 
         new_price = round(row.reference_buy_max + config.REPRICE_TICK, 2)
-        m = margin_pct(new_price, row.reference_sell_min)
+        m = reprice_margin_pct(new_price, row.placed_price, row.reference_sell_min, row.volume_remain)
         cost = round(new_price - row.placed_price, 2)
 
         if m >= config.MARGIN_FLOOR_PCT:

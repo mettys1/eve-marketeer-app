@@ -61,8 +61,14 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <h2>Existing orders — reprice / cancel</h2>
 {orders_table}
 
-<h2>New buy order candidates</h2>
-{candidates_table}
+<h2>New buy order candidates — levné (&lt; {tier_cheap_max})</h2>
+{candidates_table_cheap}
+
+<h2>New buy order candidates — střední ({tier_cheap_max} – {tier_mid_max})</h2>
+{candidates_table_mid}
+
+<h2>New buy order candidates — drahé (&gt;= {tier_mid_max})</h2>
+{candidates_table_expensive}
 
 <h2>Net worth &amp; capital decomposition</h2>
 {net_worth_chart}
@@ -184,14 +190,26 @@ def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, 
 
     orders_display = orders_eval[["item_name", "placed_price", "new_price", "action", "reason", "reprice_cost_so_far"]] \
         if not orders_eval.empty else orders_eval
-    candidates_display = candidates[["item_name", "suggested_qty", "suggested_price", "margin_pct", "risk_band", "est_cost"]] \
-        if not candidates.empty else candidates
+
+    candidate_cols = ["item_name", "suggested_qty", "suggested_price", "margin_pct", "risk_band", "est_cost"]
+    if candidates.empty:
+        cheap_display = mid_display = expensive_display = candidates
+    else:
+        cheap_display = candidates[candidates["price_tier"] == "levné"][candidate_cols]
+        mid_display = candidates[candidates["price_tier"] == "střední"][candidate_cols]
+        expensive_display = candidates[candidates["price_tier"] == "drahé"][candidate_cols]
+
+    empty_candidates_msg = "Žádní noví kandidáti v tomhle cenovém pásmu (viz log — možná tenký watchlist při aktuálních prazích)."
 
     html = PAGE_TEMPLATE.format(
         run_date=run_date,
         headline_cards=_headline_cards(headline),
         orders_table=_table_or_empty(orders_display, "Žádné otevřené buy ordery."),
-        candidates_table=_table_or_empty(candidates_display, "Žádní noví kandidáti (viz log — možná tenký watchlist při aktuálních prazích)."),
+        tier_cheap_max=_fmt_isk(config.PRICE_TIER_CHEAP_MAX),
+        tier_mid_max=_fmt_isk(config.PRICE_TIER_MID_MAX),
+        candidates_table_cheap=_table_or_empty(cheap_display, empty_candidates_msg),
+        candidates_table_mid=_table_or_empty(mid_display, empty_candidates_msg),
+        candidates_table_expensive=_table_or_empty(expensive_display, empty_candidates_msg),
         net_worth_chart=_net_worth_chart(trend_df),
         profit_chart=_profit_chart(trend_df),
     )
