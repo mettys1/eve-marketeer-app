@@ -27,7 +27,7 @@
 //    explicitly to a real boolean below.
 'use strict';
 const { BigQuery } = require('@google-cloud/bigquery');
-const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames } = require('./lib');
+const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames, retryable } = require('./lib');
 
 const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 const KNOWN_LOCATIONS = {
@@ -50,7 +50,7 @@ async function fetchPreviouslyOpenOrderIds(bq) {
     )
     WHERE rn = 1 AND (is_open IS NULL OR is_open = TRUE)
   `;
-  const [rows] = await bq.query({ query });
+  const [rows] = await retryable(() => bq.query({ query }), { label: 'fetchPreviouslyOpenOrderIds query' });
   return rows;
 }
 
@@ -124,7 +124,10 @@ async function main() {
 
   const rows = [...openRows, ...closingRows];
   if (rows.length > 0) {
-    await bq.dataset(BQ_DATASET).table('my_orders').insert(rows);
+    await retryable(
+      () => bq.dataset(BQ_DATASET).table('my_orders').insert(rows),
+      { label: 'my_orders insert' }
+    );
   }
   console.log(`Wrote ${openRows.length} open + ${closingRows.length} closed row(s) to BigQuery ${GCP_PROJECT_ID}.${BQ_DATASET}.my_orders`);
 }

@@ -93,11 +93,15 @@ def redeploy():
     run(["gcloud", "builds", "submit", str(POLLER_DIR), f"--tag={image}"], check=True)
 
     poller_sa_email = f"{POLLER_SA}@{PROJECT_ID}.iam.gserviceaccount.com"
-    # Keep in sync with config.py's TOP_N_ITEMS/coverage comments if these change.
+    # Keep in sync with poller.js's env var header comment if these change.
+    # TOP_N_EXPENSIVE=500 added 2026-09-02 — force-includes the top 500 type_ids by ISK
+    # volume (avg price * avg daily unit volume), separate from TOP_N_ITEMS's unit-volume
+    # ranking, so expensive/low-unit-volume items (ships, faction modules) actually make it
+    # into the scanned pool. Starter guess, not calibrated yet.
     job_env_vars = (
         f"GCP_PROJECT_ID={PROJECT_ID},BQ_DATASET={DATASET},ITEM_MODE=top_volume,"
-        f"TOP_N_ITEMS=4000,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,RANK_CONCURRENCY=10,"
-        f"SCAN_CONCURRENCY=6,NODE_OPTIONS=--max-old-space-size=2560"
+        f"TOP_N_ITEMS=4000,TOP_N_EXPENSIVE=500,HISTORY_DAYS=14,WRITE_RAW_ORDERS=true,"
+        f"RANK_CONCURRENCY=10,SCAN_CONCURRENCY=6,NODE_OPTIONS=--max-old-space-size=2560"
     )
     job_common_args = [
         f"--image={image}",

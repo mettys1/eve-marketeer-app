@@ -191,7 +191,10 @@ def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, 
     orders_display = orders_eval[["item_name", "placed_price", "new_price", "action", "reason", "reprice_cost_so_far"]] \
         if not orders_eval.empty else orders_eval
 
-    candidate_cols = ["item_name", "suggested_qty", "suggested_price", "margin_pct", "risk_band", "est_cost"]
+    # candidate_type added 2026-09-02 ("ranked" vs "first_mover" — step 3b,
+    # no existing buy order, see eval/sizing.rank_first_mover_candidates)
+    # so first-mover rows are visibly distinguishable, not silently mixed in.
+    candidate_cols = ["item_name", "candidate_type", "suggested_qty", "suggested_price", "margin_pct", "risk_band", "est_cost"]
     if candidates.empty:
         cheap_display = mid_display = expensive_display = candidates
     else:

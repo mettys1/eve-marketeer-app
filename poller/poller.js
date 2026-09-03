@@ -22,6 +22,17 @@
  *     ranking cutoff, however wide, can never fully guarantee that something he's actually
  *     trading right now stays in it every single day, so this closes that gap unconditionally
  *     instead of relying on TOP_N_ITEMS width alone.
+ *
+ *     Also force-includes the top TOP_N_EXPENSIVE type_ids by ISK volume (avg daily price *
+ *     avg daily unit volume), separately from the TOP_N_ITEMS-by-unit-volume cutoff — added
+ *     2026-09-02. Ranking by raw unit volume structurally favors cheap high-turnover
+ *     consumables (ammo, minerals, compressed gas/ore) over expensive low-unit-volume items
+ *     (ships, faction/deadspace modules), even when the expensive item moves comparable or
+ *     more total ISK per day. Confirmed 2026-09-02 after eval/dashboard.py's new price-tier
+ *     split showed 300+/300+ candidates in "levné" and zero in "střední"/"drahé" — not a
+ *     step-3 filtering problem, the expensive items simply weren't in the scanned pool at all.
+ *     No extra ESI calls needed: avg price comes from the same /history/ payload rankByVolume
+ *     already fetches per type_id for the volume ranking. See TOP_N_EXPENSIVE below.
  *   "watchlist" — falls back to the original hand-picked WATCHLIST (+ CANDIDATES_PRICIER if
  *     SCAN_ALL=true). Kept as an escape hatch: cheap, fast, useful if the region types/ranking
  *     pass ever misbehaves or you just want the old fixed 52/84-item behavior back.
@@ -41,6 +52,12 @@
  *                            still be too small or too slow.
  *   FORCE_INCLUDE_HELD_ORDERS (default: "true") — only used when ITEM_MODE=top_volume; set
  *                            "false" to disable the my_orders force-include described above.
+ *   TOP_N_EXPENSIVE          (default: 500) — only used when ITEM_MODE=top_volume; how many
+ *                            extra type_ids to force-include, ranked by ISK volume (avg price *
+ *                            avg daily unit volume) instead of raw unit volume. STARTER GUESS,
+ *                            not calibrated against a real run — adjust after seeing how many
+ *                            actually land in eval/sizing.py's candidate filters. Set to 0 to
+ *                            disable this dimension entirely.
  *   SCAN_ALL                (default: "false") — only used when ITEM_MODE=watchlist; set "true"
  *                            to also scan the 32 pricier-ships/minerals candidates
  *   HISTORY_DAYS            (default: 14) — turnover lookback window (also the ranking window
@@ -78,6 +95,7 @@ const DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 const ITEM_MODE = (process.env.ITEM_MODE || 'top_volume').toLowerCase();
 const TOP_N_ITEMS = Number(process.env.TOP_N_ITEMS) || 4000;
 const FORCE_INCLUDE_HELD_ORDERS = (process.env.FORCE_INCLUDE_HELD_ORDERS || 'true').toLowerCase() !== 'false';
+const TOP_N_EXPENSIVE = process.env.TOP_N_EXPENSIVE !== undefined ? Number(process.env.TOP_N_EXPENSIVE) : 500;
 const SCAN_ALL = (process.env.SCAN_ALL || 'false').toLowerCase() === 'true';
 const HISTORY_DAYS = Number(process.env.HISTORY_DAYS) || 14;
 const WRITE_RAW_ORDERS = (process.env.WRITE_RAW_ORDERS || 'true').toLowerCase() !== 'false';
@@ -173,6 +191,32 @@ async function fetchMarketGroupTypeIds(groupIds) {
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Added 2026-09-04, after eve-jita-poller failed twice in a row on the exact same
+// transient BigQuery error (503 "Service is unavailable"/backendError), right at the
+// very last step of an otherwise-successful run — see esi-jobs/lib.js's identical
+// helper for the full story (esi-perimeter-poller hit the same class of error the
+// same day). Local copy here because poller.js is deployed separately and doesn't
+// import esi-jobs/lib.js.
+function isRetryableBqError(err) {
+  const code = err && err.code;
+  if (code === 500 || code === 503) return true;
+  const reason = err && err.errors && err.errors[0] && err.errors[0].reason;
+  return ['backendError', 'internalError', 'rateLimitExceeded'].includes(reason);
+}
+
+async function retryable(fn, { label = 'BigQuery operation', maxAttempts = 4, baseDelayMs = 2000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= maxAttempts || !isRetryableBqError(err)) throw err;
+      const delay = baseDelayMs * 2 ** (attempt - 1);
+      console.log(`${label}: attempt ${attempt} failed (${err.message}) — retrying in ${delay}ms...`);
+      await sleep(delay);
+    }
+  }
+}
+
 async function esiGet(url, attempt = 1) {
   const res = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'eve-jita-poller/1.0 (Cloud Run Job)' } });
   const remain = res.headers.get('x-esi-error-limit-remain');
@@ -262,17 +306,22 @@ async function fetchHistory(typeId) {
 // Ranks every type_id in `typeIds` by avg daily volume over the last `historyDays` days.
 // Deliberately does NOT keep the full history payload per item — with 15-20k type_ids in the
 // region, holding a year of daily records for every single one in memory at once is what OOM'd
-// the container the first time around. Just keep the one aggregate number needed for sorting;
-// the scan pass below re-fetches full history for the (much smaller) kept set.
+// the container the first time around. Just keep the aggregate numbers needed for sorting (both
+// dimensions — see TOP_N_EXPENSIVE above); the scan pass below re-fetches full history for the
+// (much smaller) kept set.
+//
+// avgPrice/iskVolume added 2026-09-02, reusing the same /history/ payload already fetched here
+// (each day's record carries `average`) — no extra ESI calls needed to also rank by ISK volume.
 async function rankByVolume(typeIds, historyDays, concurrency) {
   let done = 0;
   const results = await mapWithConcurrency(typeIds, concurrency, async (typeId) => {
     const history = await fetchHistory(typeId);
     const recent = history.slice(-historyDays);
     const avgVol = recent.length ? recent.reduce((s, d) => s + d.volume, 0) / recent.length : 0;
+    const avgPrice = recent.length ? recent.reduce((s, d) => s + d.average, 0) / recent.length : 0;
     done++;
     if (done % 1000 === 0) console.log(`  ranking progress: ${done}/${typeIds.length}`);
-    return { typeId, avgVol };
+    return { typeId, avgVol, avgPrice, iskVolume: avgVol * avgPrice };
   });
   const ranked = results.filter(r => r && !r.__error);
   ranked.sort((a, b) => b.avgVol - a.avgVol);
@@ -341,7 +390,7 @@ async function fetchHeldTypeIds(bq) {
     )
     where rn = 1 and (is_open is null or is_open = true)
   `;
-  const [rows] = await bq.query({ query: sql });
+  const [rows] = await retryable(() => bq.query({ query: sql }), { label: 'fetchHeldTypeIds query' });
   return rows.map(r => ({ typeId: r.type_id, name: r.item_name }));
 }
 
@@ -367,6 +416,20 @@ async function buildItemList(bq) {
   const top = ranked.slice(0, TOP_N_ITEMS).map(r => r.typeId);
 
   const combined = new Map(top.map(typeId => [typeId, null])); // name filled in below
+
+  if (TOP_N_EXPENSIVE > 0) {
+    const byIskVolume = [...ranked].sort((a, b) => b.iskVolume - a.iskVolume);
+    const topExpensive = byIskVolume.slice(0, TOP_N_EXPENSIVE);
+    let addedExpensive = 0;
+    for (const { typeId } of topExpensive) {
+      if (!combined.has(typeId)) {
+        addedExpensive++;
+        combined.set(typeId, null);
+      }
+    }
+    console.log(`Force-including top ${TOP_N_EXPENSIVE} type_ids by ISK volume (${addedExpensive} were outside the top ${TOP_N_ITEMS} by unit volume).`);
+  }
+
   if (FORCE_INCLUDE_HELD_ORDERS) {
     try {
       const held = await fetchHeldTypeIds(bq);
@@ -500,10 +563,13 @@ async function main() {
     const tmpFile = path.join(os.tmpdir(), `eve-history-${Date.now()}.jsonl`);
     fs.writeFileSync(tmpFile, historyRows.map(r => JSON.stringify(r)).join('\n'));
     try {
-      await dataset.table('market_history').load(tmpFile, {
-        sourceFormat: 'NEWLINE_DELIMITED_JSON',
-        writeDisposition: 'WRITE_TRUNCATE',
-      });
+      await retryable(
+        () => dataset.table('market_history').load(tmpFile, {
+          sourceFormat: 'NEWLINE_DELIMITED_JSON',
+          writeDisposition: 'WRITE_TRUNCATE',
+        }),
+        { label: 'market_history load' }
+      );
     } finally {
       fs.unlinkSync(tmpFile);
     }
@@ -516,7 +582,10 @@ async function insertInBatches(table, rows, batchSize = 5000) {
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
     try {
-      await table.insert(batch, { skipInvalidRows: false, ignoreUnknownValues: false });
+      await retryable(
+        () => table.insert(batch, { skipInvalidRows: false, ignoreUnknownValues: false }),
+        { label: `${table.id} insert (batch starting row ${i})` }
+      );
     } catch (err) {
       // BigQuery insert errors often carry per-row detail in err.errors — surface it, don't swallow it.
       console.error(`Insert failed for batch starting at row ${i}:`, JSON.stringify(err.errors || err.message).slice(0, 2000));

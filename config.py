@@ -118,12 +118,86 @@ DEPTH_CAP_FRACTION = 0.15       # of min(buy.volume, sell.volume)
 # surfaced 9000%+ "margins" on near-zero-liquidity items — same blunt
 # safeguards bigquery/recompute_top_of_book.sql already uses.
 MARGIN_CEILING_PCT = 100.0      # above this -> reference-price artifact, not a real trade
-MIN_ORDERS_PER_SIDE = 3         # below this on either buy or sell side -> too thin to trust
+MIN_ORDERS_PER_SIDE = 3         # No longer a standalone liquidity gate on its own (see
+                                 # MIN_DAILY_PROFIT_TURNOVER below) — 2026-09-02, after Matej
+                                 # found 344/344 candidates were cheap niche items (compressed
+                                 # gases/ores) that passed this check but aren't really traded.
+                                 # Order counts alone prove standing orders exist, not that real
+                                 # volume moves. Repurposed same day as the absolute-order-count
+                                 # fallback in eval/sizing.compute_risk_band() for low-volume
+                                 # items — see DENSITY_MIN_VOLUME_FOR_RATIO below.
 
-# Density risk bands (density * 1000, i.e. "per 1000 units of volume")
+# Replaces MIN_ORDERS_PER_SIDE as the liquidity gate for step 3 candidates
+# (added 2026-09-02). Real signal = actual realized ESI trade volume
+# (avg_daily_volume_14d) weighted by how much profit each unit is worth,
+# not just "are there >=3 standing orders" (which a stale/parked order
+# satisfies without any real trading happening). Filter:
+#   avg_daily_volume_14d * profit_per_unit >= MIN_DAILY_PROFIT_TURNOVER
+# STARTER GUESS, NOT CALIBRATED — the diagnostic query to size this against
+# real candidate data was never run. Treat the first real dashboard output
+# after this ships as the calibration run, and adjust with Matej from there.
+MIN_DAILY_PROFIT_TURNOVER = 50_000.0   # ISK/day of profit turnover, floor
+
+# --- Step 3b: "first mover" candidates (no existing buy order) -----------
+# Added 2026-09-02. CANDIDATES_SQL requires an existing buy order (jita or
+# perimeter) to compute a reference buy price — this silently drops items
+# that ARE traded (real sell-side volume) but have zero standing buy orders
+# right now. Per Matej, that's actually the ideal case for a "first in
+# line" strategy: no competition to outbid. Confirmed 2026-09-02:
+# "jakou cenu nabídnout, když neexistuje žádná konkurenční buy objednávka?
+# Malou, skoro nulovou. Spousta lidi nekontroluje buy ordery a jen to
+# proda." -> price = sell_min * NO_COMPETITION_BUY_PRICE_PCT.
+# Starting value confirmed by Matej ("Asi otestujeme. Zacni 10") — treat
+# as a first test value, not a final calibrated number.
+NO_COMPETITION_BUY_PRICE_PCT = 0.10
+
+# Reserved slice of available_capital set aside for first-mover candidates,
+# kept separate from the main ranked walk in rank_new_candidates(). Needed
+# because first-mover profit_per_unit is artificially huge (buy priced at
+# 10% of sell) — without a separate cap, these rows would sort to the top
+# by profit_per_unit and could consume the entire day's budget before any
+# normal candidate gets a look in. STARTER GUESS — flag for Matej to
+# confirm/adjust, same as MIN_DAILY_PROFIT_TURNOVER above.
+FIRST_MOVER_BUDGET_PCT = 0.15
+
+# Reserved slice of main_budget guaranteed to the "levné" price tier via its
+# own walk in eval/sizing.rank_new_candidates(), run BEFORE the general walk
+# over everything else — added 2026-09-02, same day risk_band stopped being
+# a hard filter (see DENSITY_MIN_VOLUME_FOR_RATIO below). Once "střední"/
+# "drahé" candidates could appear, a real run showed "levné" candidates
+# collapse from ~250 to 30: sorting by absolute profit_per_unit means a
+# handful of expensive positions (each near the 20%-of-budget
+# PER_POSITION_PCT cap) ate almost the whole budget before the walk got
+# deep into the individually-cheap levné rows. Matej confirmed 2026-09-02
+# the tier split already makes this fine to browse, but wanted more than 30
+# absolute candidates. STARTER GUESS, not calibrated — adjust after seeing
+# how many levné/střední/drahé candidates a real run produces with this.
+LEVNE_RESERVED_BUDGET_PCT = 0.40
+
+# Density risk bands (density * 1000, i.e. "per 1000 units of volume").
+# DROPPED as a hard filter in eval/sizing.rank_new_candidates() /
+# rank_first_mover_candidates() on 2026-09-02 — confirmed with Matej after
+# eval/debug_candidates.py showed the ratio was simply too strict for
+# anything but very-high-volume cheap items: a real run had 486/486
+# "střední" and 641/641 "drahé" candidates at risk_band="high", and even
+# after adding the DENSITY_MIN_VOLUME_FOR_RATIO fallback below, everything
+# priced between 10M and 1.6B ISK was STILL empty (a genuine dead zone, not
+# just the near-zero-volume edge case the fallback targeted).
+# MIN_DAILY_PROFIT_TURNOVER above is the real liquidity gate now — it's a
+# strictly better signal anyway (weighted by real profit, not raw order
+# count). risk_band/density_per_1000 are still computed and shown on the
+# dashboard as an informational column via eval.sizing.compute_risk_band(),
+# just no longer block a candidate from appearing.
 DENSITY_LOW_MAX = 0.2
 DENSITY_MEDIUM_MAX = 2.0
-# > DENSITY_MEDIUM_MAX -> high/very high risk
+# > DENSITY_MEDIUM_MAX -> high/very high risk (label only, not a filter)
+
+# Below this avg_daily_volume_14d (units/day), compute_risk_band() falls
+# back to the absolute MIN_ORDERS_PER_SIDE floor instead of the ratio above
+# (dividing by a near-zero volume explodes the ratio into the thousands for
+# ANY normal order count) — still only affects the risk_band LABEL, not
+# filtering, per the note above.
+DENSITY_MIN_VOLUME_FOR_RATIO = 10.0
 
 # Price tiers for candidates — DISPLAY ONLY (added 2026-09-02). Doesn't touch
 # ranking, filtering, or sizing at all — sizing.rank_new_candidates() still

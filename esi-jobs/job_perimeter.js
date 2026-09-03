@@ -5,7 +5,7 @@
 //   gcloud run jobs execute esi-perimeter-poller --region=europe-west1
 'use strict';
 const { BigQuery } = require('@google-cloud/bigquery');
-const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames } = require('./lib');
+const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames, retryable } = require('./lib');
 
 const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 const STRUCTURE_ID = 1044752365771; // Perimeter - 0.0% Neutral States Market HQ
@@ -51,7 +51,11 @@ async function main() {
     issued: o.issued,
   }));
   for (let i = 0; i < rows.length; i += 5000) {
-    await bq.dataset(BQ_DATASET).table('perimeter_orders_raw').insert(rows.slice(i, i + 5000));
+    const batch = rows.slice(i, i + 5000);
+    await retryable(
+      () => bq.dataset(BQ_DATASET).table('perimeter_orders_raw').insert(batch),
+      { label: `perimeter_orders_raw insert (batch starting row ${i})` }
+    );
   }
   console.log(`Wrote ${rows.length} rows to BigQuery ${GCP_PROJECT_ID}.${BQ_DATASET}.perimeter_orders_raw`);
 }

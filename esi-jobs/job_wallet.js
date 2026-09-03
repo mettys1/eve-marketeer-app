@@ -14,7 +14,7 @@
 // Trigger manually: gcloud run jobs execute esi-wallet-poller --region=europe-west1
 'use strict';
 const { BigQuery } = require('@google-cloud/bigquery');
-const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames } = require('./lib');
+const { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames, retryable } = require('./lib');
 
 const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 
@@ -153,7 +153,10 @@ async function main() {
     let done = 0;
     for (const batch of chunks(rows, CHUNK)) {
       try {
-        await bq.query({ query: sql, params: { rows: batch }, types: { rows: [types] } });
+        await retryable(
+          () => bq.query({ query: sql, params: { rows: batch }, types: { rows: [types] } }),
+          { label: `${label} merge (batch after ${done} succeeded)` }
+        );
         done += batch.length;
       } catch (err) {
         console.error(`WALLET_JOB_ERROR[${label}]: batch of ${batch.length} rows failed (after ${done} succeeded).`);

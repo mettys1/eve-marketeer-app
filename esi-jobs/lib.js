@@ -59,6 +59,39 @@ async function fetchAllPages(url, accessToken) {
   return all;
 }
 
+// Added 2026-09-04, after eve-jita-poller AND esi-perimeter-poller both failed
+// back-to-back-to-back on the exact same root cause: a transient BigQuery
+// insertAll/query error (503 "Service is unavailable" / 500 "internalError"),
+// always right at the very last step of a run that had already done all the
+// real (expensive) work — pulling ESI data, resolving names, etc. Google's own
+// error message says it outright: "Retrying the job with back-off as described
+// in the BigQuery SLA should solve the problem." This wraps any async BigQuery
+// call with a few retries + exponential backoff instead of losing the whole
+// run to one transient blip. Used by every esi-jobs/job_*.js write path;
+// poller/poller.js has its own local copy (separate deploy, doesn't import
+// this file).
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function isRetryableBqError(err) {
+  const code = err && err.code;
+  if (code === 500 || code === 503) return true;
+  const reason = err && err.errors && err.errors[0] && err.errors[0].reason;
+  return ['backendError', 'internalError', 'rateLimitExceeded'].includes(reason);
+}
+
+async function retryable(fn, { label = 'BigQuery operation', maxAttempts = 4, baseDelayMs = 2000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= maxAttempts || !isRetryableBqError(err)) throw err;
+      const delay = baseDelayMs * 2 ** (attempt - 1);
+      console.log(`${label}: attempt ${attempt} failed (${err.message}) — retrying in ${delay}ms...`);
+      await sleep(delay);
+    }
+  }
+}
+
 async function resolveTypeNames(typeIds) {
   const uniqueIds = [...new Set(typeIds)];
   const names = {};
@@ -75,4 +108,4 @@ async function resolveTypeNames(typeIds) {
   return names;
 }
 
-module.exports = { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames };
+module.exports = { GCP_PROJECT_ID, ESI_BASE, loadCredentials, refreshAccessToken, fetchAllPages, resolveTypeNames, retryable, sleep };

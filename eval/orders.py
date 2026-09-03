@@ -172,4 +172,12 @@ def evaluate_open_orders(client) -> pd.DataFrame:
     df["new_price"] = new_prices
     df["reason"] = reasons
     df["reprice_cost_so_far"] = costs
+
+    # Sorted alphabetically by item_name (added 2026-09-02, per Matej) — the
+    # SQL/BigQuery result order is arbitrary/unstable, which made the
+    # dashboard's "existing orders" table awkward to scan by hand against
+    # the in-game orders list. Applies uniformly across REPRICE/CANCEL/SKIP
+    # rows (not grouped by action) — easiest to eyeball against an
+    # alphabetically-sorted in-game orders list.
+    df = df.sort_values("item_name", kind="stable").reset_index(drop=True)
     return df
