@@ -7,6 +7,7 @@ venv/
 
 # Dashboard output (regenerated every run, not source)
 eval/output/
+output/
 
 # Credentials — never commit these if/when they show up
 service-account*.json
@@ -18,7 +19,3 @@ credentials*.json
 .DS_Store
 .vscode/
 .idea/
-output/eval_20260901_2334.html
-output/eval_20260902_0005.html
-output/eval_20260902_0013.html
-output/eval_20260902_0032.html

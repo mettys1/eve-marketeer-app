@@ -31,19 +31,57 @@ async function loadCredentials() {
   return JSON.parse(version.payload.data.toString('utf8'));
 }
 
-async function refreshAccessToken(refreshToken) {
-  const res = await fetch(`${SSO_BASE}/v2/oauth/token`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Host: 'login.eveonline.com',
-      Authorization: `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`,
-    },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(`Token refresh failed: ${JSON.stringify(json)}`);
-  return json.access_token;
+// Fixed 2026-09-03 — all three esi-jobs Cloud Run Jobs failed back-to-back with an
+// unhelpful "SyntaxError: Unexpected token '<' ... is not valid JSON" from the old
+// `await res.json()` call below. Root cause: EVE SSO (or something in front of it —
+// a gateway/WAF) occasionally returns an HTML error page instead of a JSON body, and
+// blindly calling res.json() on that just throws a useless parse error with no status
+// code or body visible in the logs. Now: read the body as text first, so a bad
+// response is always diagnosable (status + snippet in the thrown error), and retry a
+// few times with backoff for the cases that look transient (non-JSON body, or a 5xx
+// JSON error) — a genuine 4xx (bad refresh token, bad client credentials) still fails
+// immediately, since retrying that would never succeed.
+async function refreshAccessToken(refreshToken, { maxAttempts = 3, baseDelayMs = 2000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`${SSO_BASE}/v2/oauth/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Host: 'login.eveonline.com',
+        Authorization: `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`,
+      },
+      body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+    });
+    const bodyText = await res.text();
+
+    let json;
+    let parseError = null;
+    try {
+      json = JSON.parse(bodyText);
+    } catch (err) {
+      parseError = err;
+    }
+
+    if (parseError) {
+      const err = new Error(`Token refresh returned non-JSON response (status ${res.status}): ${bodyText.slice(0, 300)}`);
+      if (attempt >= maxAttempts) throw err;
+      const delay = baseDelayMs * 2 ** (attempt - 1);
+      console.log(`refreshAccessToken: attempt ${attempt} got a non-JSON response (status ${res.status}) — retrying in ${delay}ms...`);
+      await sleep(delay);
+      continue;
+    }
+
+    if (!res.ok) {
+      const err = new Error(`Token refresh failed (status ${res.status}): ${JSON.stringify(json)}`);
+      if (attempt >= maxAttempts || res.status < 500) throw err; // 4xx = not worth retrying (bad token/creds)
+      const delay = baseDelayMs * 2 ** (attempt - 1);
+      console.log(`refreshAccessToken: attempt ${attempt} failed (status ${res.status}) — retrying in ${delay}ms...`);
+      await sleep(delay);
+      continue;
+    }
+
+    return json.access_token;
+  }
 }
 
 async function fetchAllPages(url, accessToken) {
