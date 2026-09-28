@@ -243,7 +243,20 @@ def compute_available_capital(client, orders_eval: pd.DataFrame) -> float:
             extra_escrow = float((delta * repriced["volume_remain"]).sum())
 
     reserve = config.CAPITAL_RESERVE_PCT * cash
-    return cash + freed - extra_escrow - reserve
+    available = cash + freed - extra_escrow - reserve
+
+    # Added 2026-09-28: a negative budget used to fail silently (empty tiers,
+    # dashboard blamed a "thin watchlist"). Always log the breakdown.
+    print(f"[sizing] available_capital = cash {cash:,.0f} + freed {freed:,.0f} "
+          f"- reprice escrow {extra_escrow:,.0f} - reserve {reserve:,.0f} = {available:,.0f} ISK")
+    if available <= 0 and not orders_eval.empty:
+        repriced = orders_eval[orders_eval["action"] == "REPRICE"].copy()
+        repriced["extra_escrow"] = (repriced["new_price"] - repriced["placed_price"]) * repriced["volume_remain"]
+        top = repriced.sort_values("extra_escrow", ascending=False).head(5)
+        print("[sizing] WARNING: no budget for new orders. Biggest reprice escrow items:")
+        for r in top.itertuples():
+            print(f"    {r.item_name}: {r.extra_escrow:,.0f} ISK")
+    return available
 
 
 def rank_new_candidates(client, available_capital: float, exclude_type_ids: set) -> pd.DataFrame:

@@ -89,9 +89,19 @@ def _headline_cards(headline: dict) -> str:
     delta_class = "positive" if headline["net_worth_delta"] >= 0 else "negative"
     reserve_class = "positive" if headline["reserve_ok"] else "warn"
 
+    last_checkpoint_at = headline.get("last_checkpoint_at")
+    if last_checkpoint_at is not None:
+        # BigQuery TIMESTAMP comes back UTC — labelled explicitly so it's never
+        # mistaken for a fixed "24h ago" window (that was the actual bug: the
+        # old delta silently compared to exactly 24h ago, which is wrong
+        # whenever this isn't run every single day — see kpi.py's docstring).
+        net_worth_label = f"Net worth (Δ vs. {last_checkpoint_at.strftime('%d.%m %H:%M')} UTC)"
+    else:
+        net_worth_label = "Net worth (první report — zatím bez srovnání)"
+
     cards = [
         HEADLINE_CARD_TEMPLATE.format(
-            label="Net worth (Δ vs. včera)",
+            label=net_worth_label,
             value=f"{_fmt_isk(headline['net_worth_today'])} "
                   f"({headline['net_worth_delta_pct']:+.1f}%)",
             value_class=delta_class,
@@ -99,6 +109,15 @@ def _headline_cards(headline: dict) -> str:
         HEADLINE_CARD_TEMPLATE.format(
             label="Otevřené buy ordery",
             value=f"{headline['open_order_count']} ks / {_fmt_isk(headline['locked_isk'])}",
+            value_class="",
+        ),
+        HEADLINE_CARD_TEMPLATE.format(
+            # Added 2026-09-08 — sell orders are real net worth (cancel one and
+            # you have the item back), just not cash, so they now count toward
+            # net_worth_today too (see kpi.py). This card breaks that piece out
+            # so it's visible, not silently folded into one big number.
+            label="Vystaveno k prodeji",
+            value=f"{headline['sell_order_count']} ks / {_fmt_isk(headline['listed_isk'])}",
             value_class="",
         ),
         HEADLINE_CARD_TEMPLATE.format(
@@ -184,7 +203,8 @@ def _profit_chart(trend_df: pd.DataFrame) -> str:
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
-def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, trend_df: pd.DataFrame, open_browser: bool = True) -> str:
+def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, trend_df: pd.DataFrame, open_browser: bool = True,
+           available_capital: float = None) -> str:
     config.DASHBOARD_OUTPUT_DIR.mkdir(exist_ok=True)
     run_date = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -203,6 +223,12 @@ def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, 
         expensive_display = candidates[candidates["price_tier"] == "drahé"][candidate_cols]
 
     empty_candidates_msg = "Žádní noví kandidáti v tomhle cenovém pásmu (viz log — možná tenký watchlist při aktuálních prazích)."
+    if available_capital is not None and available_capital <= 0:
+        # Added 2026-09-28 — don't blame the watchlist when the real cause is budget.
+        empty_candidates_msg = (
+            f"Žádný volný kapitál pro nové ordery: available_capital = {_fmt_isk(available_capital)}. "
+            "Repricy existujících orderů by zablokovaly víc ISK, než je cash — viz log [sizing]."
+        )
 
     html = PAGE_TEMPLATE.format(
         run_date=run_date,

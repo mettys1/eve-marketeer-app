@@ -154,6 +154,16 @@ def evaluate_open_orders(client) -> pd.DataFrame:
             costs.append(None)
             continue
 
+        if row.placed_price < config.LOWBALL_HOLD_RATIO * row.reference_buy_max:
+            actions.append("HOLD")
+            new_prices.append(None)
+            reasons.append(
+                f"lowball order ({row.placed_price:,.2f} < {config.LOWBALL_HOLD_RATIO:.0%} of top buy "
+                f"{row.reference_buy_max:,.2f}) — waiting for dumps, not chasing"
+            )
+            costs.append(None)
+            continue
+
         new_price = round(row.reference_buy_max + config.REPRICE_TICK, 2)
         m = reprice_margin_pct(new_price, row.placed_price, row.reference_sell_min, row.volume_remain)
         cost = round(new_price - row.placed_price, 2)

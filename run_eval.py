@@ -52,7 +52,7 @@ def main() -> int:
         print(f"[features] non-fatal error, continuing: {e}")
 
     print("[6/6] rendering dashboard...")
-    out_path = dashboard.render(headline, orders_eval, candidates, trend_df)
+    out_path = dashboard.render(headline, orders_eval, candidates, trend_df, available_capital=available_capital)
     print(f"done -> {out_path}")
     return 0
 

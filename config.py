@@ -26,6 +26,15 @@ TABLE_ML_FEATURES = f"{PROJECT_ID}.{DATASET}.ml_features"  # created by features
 # sizing.py compute cash + capital directly from wallet_journal / my_orders
 # instead, reusing the same SQL already proven in esi-oauth-service's
 # /report endpoint (wallet_capital, trading_pnl_daily reports).
+TABLE_NET_WORTH_CHECKPOINTS = f"{PROJECT_ID}.{DATASET}.net_worth_checkpoints"  # created by
+# kpi.py if missing. Added 2026-09-08 — the "Net worth (Δ vs. last update)" headline card
+# used to compare against a hardcoded trailing-24h wallet-cash window, which is wrong
+# whenever Matej doesn't open the report every single day: he came back after several days
+# (net worth had genuinely dropped ~516M ISK, 5.23B -> 4.71B) and the badge still showed
+# +4.8%, because it only ever looked at the last 24h and ignored escrow entirely. This
+# table stores one row (net_worth, cash, locked_isk, recorded_at) every time a report is
+# actually rendered, so the NEXT run's delta is against the true previous report, however
+# long ago that was — not a fixed window.
 
 # --- Existing eve-trading pipeline (Cloud Run Jobs) ----------------------
 # CONFIRMED 2026-09-01: there is no local `daily_ops.js` — it never existed.
@@ -75,6 +84,15 @@ JITA_SYSTEM_ID = 30000142  # EVE static data: "Jita" solar system
 # buy order (not the full new-order BROKER_FEE_RATE this constant used to be
 # implicitly compared against) — see reprice_margin_pct() in eval/orders.py.
 MARGIN_FLOOR_PCT = 4.0           # below this -> CANCEL instead of REPRICE
+# Added 2026-09-28: deliberate lowball orders (first-mover style, e.g. Promethium
+# Mercurite placed at 50 ISK x 100k units) must NOT be chased to top-of-book.
+# Before this, step 2 proposed REPRICE on them, and step 3 then booked
+# (new_price - placed_price) * volume_remain as extra escrow — 3.47B ISK on
+# 2026-09-28 (2.5B from Promethium alone) vs 1.87B cash -> available_capital
+# negative -> zero new candidates in every tier since 2026-09-23.
+# placed_price < LOWBALL_HOLD_RATIO * reference_buy_max -> HOLD (leave as is,
+# no escrow change, no cancel).
+LOWBALL_HOLD_RATIO = 0.5
 REPRICE_TICK = 0.01             # ISK increment placed above buy.max
 
 # Real cost of repricing an EXISTING buy order upward at Perimeter (0%
