@@ -51,17 +51,26 @@ import config
 from eval import bq
 
 REFERENCE_PRICE_SQL = f"""
-with jita_latest as (
+-- 2026-09-28: my own orders are excluded from the buy side, so
+-- reference_buy_max = best COMPETING buy. Lets step 2 say KEEP when we are
+-- already on top instead of "repricing" against ourselves (+0.01 ISK).
+with my_ids as (
+  select distinct order_id from `{config.TABLE_MY_ORDERS}`
+),
+jita_latest as (
   select max(scan_date) as d from `{config.TABLE_MARKET_ORDERS_RAW}`
 ),
 jita_system as (
-  select r.type_id, r.is_buy_order, r.price
+  select r.type_id, r.is_buy_order, r.price, r.order_id
   from `{config.TABLE_MARKET_ORDERS_RAW}` r, jita_latest l
   where r.scan_date = l.d and r.system_id = {config.JITA_SYSTEM_ID}
 ),
 jita_buy as (
   select type_id, max(price) as jita_buy_max
-  from jita_system where is_buy_order group by type_id
+  from jita_system j
+  left join my_ids m using (order_id)
+  where j.is_buy_order and m.order_id is null
+  group by type_id
 ),
 jita_sell as (
   select type_id, min(price) as jita_sell_min
@@ -72,16 +81,25 @@ perim_latest as (
 ),
 perim_buy as (
   select r.type_id, max(r.price) as perim_buy_max
-  from `{config.TABLE_PERIMETER_ORDERS_RAW}` r, perim_latest l
-  where r.scan_date = l.d and r.is_buy_order
+  from `{config.TABLE_PERIMETER_ORDERS_RAW}` r
+  cross join perim_latest l
+  left join my_ids m on m.order_id = r.order_id
+  where r.scan_date = l.d and r.is_buy_order and m.order_id is null
   group by r.type_id
+),
+types as (
+  select type_id from jita_buy
+  union distinct select type_id from perim_buy
+  union distinct select type_id from jita_sell
 )
 select
-  type_id,
-  greatest(coalesce(jb.jita_buy_max, 0), coalesce(pb.perim_buy_max, 0)) as reference_buy_max,
+  t.type_id,
+  -- NULL = no competing buy order at all (we're the only bidder)
+  nullif(greatest(coalesce(jb.jita_buy_max, 0), coalesce(pb.perim_buy_max, 0)), 0) as reference_buy_max,
   js.jita_sell_min as reference_sell_min
-from jita_buy jb
-full outer join perim_buy pb using (type_id)
+from types t
+left join jita_buy jb using (type_id)
+left join perim_buy pb using (type_id)
 left join jita_sell js using (type_id)
 """
 
@@ -147,11 +165,24 @@ def evaluate_open_orders(client) -> pd.DataFrame:
 
     actions, new_prices, reasons, costs = [], [], [], []
     for row in df.itertuples():
-        if pd.isna(row.reference_buy_max) or pd.isna(row.reference_sell_min):
+        if pd.isna(row.reference_sell_min):
             actions.append("SKIP")
             new_prices.append(None)
             reasons.append("no fresh reference price for this item — check watchlist coverage")
             costs.append(None)
+            continue
+
+        # KEEP (added 2026-09-28): we're already the best bid -> nothing to do.
+        # A tie counts as outbid (the other order may have time priority).
+        if pd.isna(row.reference_buy_max) or row.placed_price > row.reference_buy_max:
+            m_now = margin_pct(row.placed_price, row.reference_sell_min)
+            actions.append("KEEP")
+            new_prices.append(None)
+            if pd.isna(row.reference_buy_max):
+                reasons.append(f"no competing buy order — we're top; margin now {m_now:.1f}%")
+            else:
+                reasons.append(f"we're top (next bid {row.reference_buy_max:,.2f}); margin now {m_now:.1f}%")
+            costs.append(0.0)
             continue
 
         if row.placed_price < config.LOWBALL_HOLD_RATIO * row.reference_buy_max:

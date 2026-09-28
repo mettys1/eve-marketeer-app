@@ -6,8 +6,8 @@ on what step 2 decided:
 
     available_capital = current_cash
                          + sum(escrow freed by CANCELled orders)
-                         - sum(extra escrow needed by REPRICEd orders)
-                         - CAPITAL_RESERVE_PCT * total_capital
+                         - CAPITAL_RESERVE_PCT * current_cash
+    (reprice escrow no longer deducted — removed 2026-09-28)
 
 This is the same-day, best-case snapshot described in the "first in line"
 rules — recompute it fresh each run, don't carry state between days.
@@ -229,33 +229,26 @@ def compute_risk_band(buy_order_count: int, sell_order_count: int, avg_daily_vol
 
 
 def compute_available_capital(client, orders_eval: pd.DataFrame) -> float:
+    """Changed 2026-09-28 (Matej): reprice escrow is NO LONGER deducted.
+    Previously REPRICE rows subtracted (new_price - placed_price) * volume_remain,
+    which on 2026-09-28 came to 3.47B ISK (lowball orders like Promethium
+    Mercurite 50 -> 25,220 x 100k units) vs 1.87B cash -> negative budget ->
+    zero new candidates since 2026-09-23. Repricing is now treated as a
+    separate decision that doesn't reserve budget for new orders."""
     cash = kpi.get_current_cash(client)
 
     freed = 0.0
-    extra_escrow = 0.0
     if not orders_eval.empty:
         cancelled = orders_eval[orders_eval["action"] == "CANCEL"]
         freed = float((cancelled["placed_price"] * cancelled["volume_remain"]).sum())
 
-        repriced = orders_eval[orders_eval["action"] == "REPRICE"]
-        if not repriced.empty:
-            delta = repriced["new_price"] - repriced["placed_price"]
-            extra_escrow = float((delta * repriced["volume_remain"]).sum())
-
     reserve = config.CAPITAL_RESERVE_PCT * cash
-    available = cash + freed - extra_escrow - reserve
+    available = cash + freed - reserve
 
-    # Added 2026-09-28: a negative budget used to fail silently (empty tiers,
-    # dashboard blamed a "thin watchlist"). Always log the breakdown.
     print(f"[sizing] available_capital = cash {cash:,.0f} + freed {freed:,.0f} "
-          f"- reprice escrow {extra_escrow:,.0f} - reserve {reserve:,.0f} = {available:,.0f} ISK")
-    if available <= 0 and not orders_eval.empty:
-        repriced = orders_eval[orders_eval["action"] == "REPRICE"].copy()
-        repriced["extra_escrow"] = (repriced["new_price"] - repriced["placed_price"]) * repriced["volume_remain"]
-        top = repriced.sort_values("extra_escrow", ascending=False).head(5)
-        print("[sizing] WARNING: no budget for new orders. Biggest reprice escrow items:")
-        for r in top.itertuples():
-            print(f"    {r.item_name}: {r.extra_escrow:,.0f} ISK")
+          f"- reserve {reserve:,.0f} = {available:,.0f} ISK (reprice escrow not deducted)")
+    if available <= 0:
+        print("[sizing] WARNING: no budget for new orders.")
     return available
 
 

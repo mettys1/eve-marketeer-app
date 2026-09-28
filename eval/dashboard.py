@@ -227,7 +227,7 @@ def render(headline: dict, orders_eval: pd.DataFrame, candidates: pd.DataFrame, 
         # Added 2026-09-28 — don't blame the watchlist when the real cause is budget.
         empty_candidates_msg = (
             f"Žádný volný kapitál pro nové ordery: available_capital = {_fmt_isk(available_capital)}. "
-            "Repricy existujících orderů by zablokovaly víc ISK, než je cash — viz log [sizing]."
+            "Cash po odečtení rezervy nestačí — viz log [sizing]."
         )
 
     html = PAGE_TEMPLATE.format(
