@@ -230,6 +230,36 @@ PRICE_TIER_CHEAP_MAX = 1_000_000      # < this -> "levné"
 PRICE_TIER_MID_MAX = 10_000_000       # < this (and >= cheap max) -> "střední"
 # >= PRICE_TIER_MID_MAX -> "drahé"
 
+# --- Step 4b: real P&L (eval/pnl.py) — added 2026-10-06 --------------------
+# Rolling window for the company P&L statement and the per-item P&L table.
+PNL_WINDOW_DAYS = 7
+# brokers_fee / market_provider_tax journal entries are matched to an order
+# event (my_orders.issued — set on placement, reset on every modify) within
+# this many seconds. Check "[pnl] coverage" in the run log: if a lot of fee
+# ISK stays unmatched, the cause is more likely orders placed+changed between
+# two my_orders polls than this tolerance — don't just crank it up, a wide
+# window starts attributing fees to the wrong order when placing in bulk.
+PNL_FEE_MATCH_TOLERANCE_SEC = 5
+# Expected-fee check (eval/pnl.expected_order_fees): actual journal amount
+# must be within max(ISK, %) of the expected fee to confirm an order match.
+PNL_FEE_AMOUNT_TOL_ISK = 1.0
+PNL_FEE_AMOUNT_TOL_PCT = 2.0
+# Fee entries with no order in my_orders are allocated to this character's
+# fills at the implied location within this many hours AFTER the fee.
+PNL_FEE_FILL_WINDOW_HOURS = 24
+
+# Locations (fee rules differ: Perimeter citadel = flat 100 ISK + SCC,
+# Jita NPC station = % broker fee). Same IDs as esi-jobs/job_my_orders.js.
+PERIMETER_STRUCTURE_ID = 1044752365771
+JITA_STATION_ID = 60003760
+# SCC surcharge on a NEW order in Perimeter (Matej 2026-10-06: Perimeter has
+# no % order commission, only the flat 100 ISK + SCC). Only the REPRICE SCC
+# formula is verified (REPRICE_SCC_* above); this new-order rate is a STARTER
+# GUESS = 0.1% value part + 0.5% "delta from 0". Every `python -m eval.pnl`
+# / run_eval prints the rate derived from the real journal — replace this
+# with that number.
+PERIMETER_SCC_NEW_RATE = 0.006
+
 # --- Dashboard ------------------------------------------------------------
 DASHBOARD_DEFAULT_WINDOW_DAYS = 30
 DASHBOARD_OUTPUT_DIR = Path(__file__).parent / "output"

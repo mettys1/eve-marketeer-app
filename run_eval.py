@@ -17,7 +17,7 @@ step 3 must come after step 2):
 import sys
 
 import config
-from eval import bq, refresh, orders, sizing, kpi, features, dashboard
+from eval import bq, refresh, orders, sizing, kpi, pnl, features, dashboard
 
 
 def main() -> int:
@@ -44,6 +44,9 @@ def main() -> int:
     trend_df = kpi.build_trend(client)
     headline = kpi.build_headline(client, trend_df)
 
+    print("[4b/6] P&L (FIFO, posledních %d dní)..." % config.PNL_WINDOW_DAYS)
+    pnl_result = pnl.build_pnl(client)
+
     print("[5/6] logging ml features (background only)...")
     try:
         features.log_features(client, orders_eval, candidates)
@@ -52,7 +55,8 @@ def main() -> int:
         print(f"[features] non-fatal error, continuing: {e}")
 
     print("[6/6] rendering dashboard...")
-    out_path = dashboard.render(headline, orders_eval, candidates, trend_df, available_capital=available_capital)
+    out_path = dashboard.render(headline, orders_eval, candidates, trend_df, available_capital=available_capital,
+                                pnl_result=pnl_result)
     print(f"done -> {out_path}")
     return 0
 
