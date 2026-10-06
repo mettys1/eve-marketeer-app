@@ -124,3 +124,18 @@ def test_fee_with_no_order_and_no_fill_stays_unallocated():
     f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 5000.0, None, None)])
     a = pnl.attribute_order_fees(f, orders([]), 5, tx([]))
     assert list(a.method) == ["none"]
+
+def test_sell_fee_spread_over_listed_units_not_just_sold():
+    t = tx([(1, T("2026-09-20"), 9, "MWD", 100, 700.0, True, JITA),
+            (2, T("2026-10-02"), 9, "MWD", 10, 1200.0, False, JITA)])
+    f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 1000.0, None, None)])
+    o = orders([(5, T("2026-10-01 08:00"), 9, "MWD", False, 0, JITA, 1200.0, 100, 100)])
+    r = pnl.compute(t, f, o, 7, 5, 0.0, now=NOW, open_sell_units=pd.Series({9: 90}))
+    assert r.items.iloc[0].sell_fees == pytest.approx(100.0)   # 1000 / (10 sold + 90 listed) * 10
+
+def test_range_fill_at_other_npc_station_gets_fee():
+    korsiki = 60000001
+    t = tx([(1, T("2026-10-01 09:00"), 5, "A", 10, 100.0, True, korsiki)])
+    f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 13.82, None, None)])
+    a = pnl.attribute_order_fees(f, orders([]), 5, t)
+    assert list(a.method) == ["fill"] and list(a.type_id) == [5]

@@ -30,15 +30,13 @@ Accounting rules (agreed with Matej 2026-10-06):
 * Sell-side order fees and sales tax are PERIOD costs: expensed in the window
   they are charged. Sales tax is per sale (journal transaction_tax linked via
   context_id = transaction_id; config.SALES_TAX_RATE estimate if unlinked).
-* Fee -> order attribution: the wallet journal does not say which order a
-  brokers_fee belongs to. It is matched to my_orders by timestamp —
-  ESI `issued` is set on placement AND reset on every modify, which is
-  exactly when the fee is charged. Fees within config.PNL_FEE_MATCH_TOLERANCE_SEC
-  of an order's issued time are attributed to it (split by order value if
-  several orders share that second). Known gap: an order placed AND
-  modified/filled between two my_orders polls is never seen, so its fee stays
-  unmatched. Unmatched fees are never dropped — they are expensed in the
-  company P&L as "nepřiřazené poplatky". Coverage is reported every run.
+* Fee -> item attribution (the journal doesn't say which order a fee is for),
+  see attribute_order_fees(): (1) match to a my_orders event by `issued`
+  time (set on placement, reset on every modify), confirmed by the EXPECTED
+  fee amount computed from the verified fee rules; (2) if the order was
+  never seen by a poll, allocate ("dopočítat") the fee to fills that followed
+  it at the location the fee type implies; (3) only what fits neither stays a
+  company-level "nepřiřazené poplatky" line. Coverage is logged every run.
 
 Invariant: sum(item_pnl.net_profit) + company-only lines == company net profit.
 """
@@ -68,16 +66,32 @@ from `{config.TABLE_WALLET_JOURNAL}`
 where ref_type in ('brokers_fee', 'market_provider_tax', 'transaction_tax')
 """
 
-# One row per (order_id, issued) = one placement or modify event.
+# One row per (order_id, issued) = one placement or modify event. price is
+# the price set by that event; volume_remain = max seen under that issued
+# (the earliest snapshot after the event, before further fills).
 ORDER_EVENTS_SQL = f"""
 select order_id, issued,
   any_value(type_id) as type_id,
   any_value(item_name) as item_name,
   logical_or(coalesce(is_buy_order, false)) as is_buy_order,
-  max(price * volume_total) as order_value
+  any_value(location_id) as location_id,
+  any_value(price) as price,
+  max(volume_total) as volume_total,
+  max(volume_remain) as volume_remain
 from `{config.TABLE_MY_ORDERS}`
 where issued is not null
 group by order_id, issued
+"""
+
+
+OPEN_SELL_UNITS_SQL = f"""
+select type_id, sum(volume_remain) as units
+from (
+  select *, row_number() over (partition by order_id order by scanned_at desc) as rn
+  from `{config.TABLE_MY_ORDERS}`
+)
+where rn = 1 and (is_open is null or is_open) and not coalesce(is_buy_order, false)
+group by type_id
 """
 
 
@@ -133,45 +147,148 @@ def fifo_sells(tx: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, columns=cols)
 
 
-def attribute_order_fees(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int) -> pd.DataFrame:
-    """Split each brokers_fee / market_provider_tax journal entry onto the
-    order event(s) issued within ±tol_sec of it, weighted by order value.
+def is_structure(location_id: pd.Series) -> pd.Series:
+    """Upwell structure (citadel: flat 100 ISK + SCC) vs NPC station (% broker fee).
+    Structure IDs are >= 1e12, NPC stations are ~60M. Class-based on purpose:
+    range buy orders fill at OTHER NPC stations (Korsiki, Niyabainen, ...) and
+    Perimeter has more than one citadel (Neutral States Market HQ, TTT)."""
+    return location_id.fillna(0).astype("int64") >= 1_000_000_000_000
 
-    Returns one row per (journal entry, matched order) — or one row with
-    type_id = NA for unmatched entries. Columns: journal_id, date, ref_type,
-    fee, type_id, is_buy_order, matched.
+
+def expected_order_fees(orders: pd.DataFrame) -> pd.DataFrame:
+    """Expected brokers_fee / market_provider_tax for every order event, from
+    the fee rules verified against Matej's journal (see config.py):
+
+      Structure (Perimeter citadels): brokers_fee = flat REPRICE_FLAT_FEE (100 ISK) on
+        placement and on every modify; no % commission.
+        market_provider_tax (SCC) on placement = PERIMETER_SCC_NEW_RATE * value,
+        on modify = REPRICE_SCC_RATE_VALUE * new value
+                    + REPRICE_SCC_RATE_DELTA * price increase * qty.
+      NPC station (Jita): brokers_fee on placement = BROKER_FEE_RATE * value,
+        sell modify = SELL_REPRICE_RATE * new value; buy modify unknown (NaN).
+
+    The first event seen for an order_id is treated as the placement. If the
+    order was already modified before the first my_orders poll, that guess is
+    wrong; the amount check in attribute_order_fees then simply won't confirm it.
+    Returns orders + is_new, prev_price, exp_brokers_fee, exp_market_provider_tax.
     """
+    if orders.empty:
+        return orders.assign(is_new=[], prev_price=[], exp_brokers_fee=[], exp_market_provider_tax=[])
+    o = orders.sort_values(["order_id", "issued"]).copy()
+    o["prev_price"] = o.groupby("order_id")["price"].shift()
+    o["is_new"] = o["prev_price"].isna()
+    qty_new = o["volume_total"].fillna(o["volume_remain"])
+    qty_mod = o["volume_remain"].fillna(o["volume_total"])
+    perim = is_structure(o["location_id"])
+    val_new, val_mod = o["price"] * qty_new, o["price"] * qty_mod
+    delta = (o["price"] - o["prev_price"]).clip(lower=0) * qty_mod
+
+    o["exp_brokers_fee"] = float("nan")
+    o.loc[perim, "exp_brokers_fee"] = config.REPRICE_FLAT_FEE
+    o.loc[~perim & o["is_new"], "exp_brokers_fee"] = config.BROKER_FEE_RATE * val_new
+    sell_mod = ~perim & ~o["is_new"] & ~o["is_buy_order"].astype(bool)
+    o.loc[sell_mod, "exp_brokers_fee"] = config.SELL_REPRICE_RATE * val_mod
+
+    o["exp_market_provider_tax"] = float("nan")
+    o.loc[perim & o["is_new"], "exp_market_provider_tax"] = config.PERIMETER_SCC_NEW_RATE * val_new
+    o.loc[perim & ~o["is_new"], "exp_market_provider_tax"] = (
+        config.REPRICE_SCC_RATE_VALUE * val_mod + config.REPRICE_SCC_RATE_DELTA * delta)
+    o["order_value"] = val_new.fillna(0).clip(lower=0)
+    return o
+
+
+def _amount_ok(actual: float, expected: float) -> bool:
+    return pd.notna(expected) and abs(actual - expected) <= max(
+        config.PNL_FEE_AMOUNT_TOL_ISK, config.PNL_FEE_AMOUNT_TOL_PCT / 100 * abs(expected))
+
+
+def attribute_order_fees(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int,
+                         tx: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Assign every brokers_fee / market_provider_tax journal entry to item(s).
+
+    Pass 1 — order match ("order"): order events issued within ±tol_sec.
+      If any candidate's EXPECTED fee (expected_order_fees) matches the
+      actual amount, only those candidates get it; otherwise split by
+      order value across all time candidates.
+    Pass 2 — fill allocation ("fill"), for entries with no order in my_orders
+      (order placed and filled/changed between two polls): split across this
+      character's fills in the following PNL_FEE_FILL_WINDOW_HOURS at the
+      location CLASS the fee implies (SCC or a flat 100 ISK fee -> any
+      structure, other brokers_fee -> any NPC station — range buy orders fill
+      at other stations), weighted by fill value. Side
+      (buy/sell) comes from each fill.
+    Pass 3 — nothing fits ("none"): stays a company-level cost.
+
+    Columns: journal_id, date, ref_type, fee, type_id, is_buy_order, method,
+    matched (method != "none").
+    """
+    cols = ["journal_id", "date", "ref_type", "fee", "type_id", "is_buy_order", "method", "matched"]
     f = fees[fees["ref_type"].isin(ORDER_FEE_TYPES)].copy()
-    cols = ["journal_id", "date", "ref_type", "fee", "type_id", "is_buy_order", "matched"]
     if f.empty:
         return pd.DataFrame(columns=cols).astype({"fee": float, "matched": bool})
 
+    o = expected_order_fees(orders)
     f["_sec"] = f["date"].dt.floor("s").astype("int64") // 10**9
-    if orders.empty:
-        cand = pd.DataFrame()
-    else:
-        o = orders.copy()
+    cand_by_j = {}
+    if not o.empty:
         o["_sec"] = o["issued"].dt.floor("s").astype("int64") // 10**9
-        o["order_value"] = o["order_value"].fillna(0).clip(lower=0)
         expanded = pd.concat(
-            [f[["journal_id", "_sec"]].assign(_sec=f["_sec"] + d) for d in range(-tol_sec, tol_sec + 1)]
-        )
-        cand = expanded.merge(o[["_sec", "order_id", "type_id", "is_buy_order", "order_value"]], on="_sec")
-        cand = cand.drop_duplicates(["journal_id", "order_id"])
+            [f[["journal_id", "_sec"]].assign(_sec=f["_sec"] + d) for d in range(-tol_sec, tol_sec + 1)])
+        cand = expanded.merge(o, on="_sec").drop_duplicates(["journal_id", "order_id", "issued"])
+        cand_by_j = dict(tuple(cand.groupby("journal_id")))
+
+    fills = None
+    if tx is not None and not tx.empty:
+        fills = tx.assign(value=tx["quantity"] * tx["unit_price"]).sort_values("date")
+    window = timedelta(hours=config.PNL_FEE_FILL_WINDOW_HOURS)
 
     rows = []
-    cand_by_j = dict(tuple(cand.groupby("journal_id"))) if not cand.empty else {}
     for r in f.itertuples(index=False):
         c = cand_by_j.get(r.journal_id)
-        if c is None or c.empty:
-            rows.append((r.journal_id, r.date, r.ref_type, r.fee, pd.NA, pd.NA, False))
+        if c is not None and not c.empty:
+            ok = c[[_amount_ok(r.fee, e) for e in c["exp_" + r.ref_type]]]
+            c = ok if not ok.empty else c
+            w = c["order_value"]
+            w = w / w.sum() if w.sum() > 0 else pd.Series(1.0 / len(c), index=c.index)
+            for (_, o_row), share in zip(c.iterrows(), w):
+                rows.append((r.journal_id, r.date, r.ref_type, r.fee * share,
+                             o_row["type_id"], bool(o_row["is_buy_order"]), "order"))
             continue
-        w = c["order_value"]
-        w = w / w.sum() if w.sum() > 0 else pd.Series(1.0 / len(c), index=c.index)
-        for (_, o_row), share in zip(c.iterrows(), w):
-            rows.append((r.journal_id, r.date, r.ref_type, r.fee * share,
-                         o_row["type_id"], bool(o_row["is_buy_order"]), True))
-    return pd.DataFrame(rows, columns=cols).astype({"matched": bool})
+
+        if fills is not None:
+            structure_fee = r.ref_type == "market_provider_tax" or _amount_ok(r.fee, config.REPRICE_FLAT_FEE)
+            g = fills[(fills["date"] >= r.date) & (fills["date"] <= r.date + window)
+                      & (is_structure(fills["location_id"]) == structure_fee)]
+            if not g.empty and g["value"].sum() > 0:
+                for fr, share in zip(g.itertuples(index=False), g["value"] / g["value"].sum()):
+                    rows.append((r.journal_id, r.date, r.ref_type, r.fee * share,
+                                 fr.type_id, bool(fr.is_buy), "fill"))
+                continue
+
+        rows.append((r.journal_id, r.date, r.ref_type, r.fee, pd.NA, pd.NA, "none"))
+
+    out = pd.DataFrame(rows, columns=cols[:-1])
+    out["matched"] = out["method"] != "none"
+    return out
+
+
+def derived_perimeter_scc_new_rate(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int) -> float | None:
+    """Median actual SCC / order value over NEW Perimeter orders that have exactly
+    one time candidate — the calibration for config.PERIMETER_SCC_NEW_RATE."""
+    o = expected_order_fees(orders)
+    if o.empty:
+        return None
+    o = o[o["is_new"] & is_structure(o["location_id"]) & (o["order_value"] > 0)]
+    scc = fees[fees["ref_type"] == "market_provider_tax"]
+    if o.empty or scc.empty:
+        return None
+    ratios = []
+    for e in o.itertuples(index=False):
+        hit = scc[(scc["date"] - e.issued).abs() <= pd.Timedelta(seconds=tol_sec)]
+        near = o[(o["issued"] - e.issued).abs() <= pd.Timedelta(seconds=tol_sec)]
+        if len(hit) == 1 and len(near) == 1:
+            ratios.append(hit["fee"].iloc[0] / e.order_value)
+    return float(pd.Series(ratios).median()) if ratios else None
 
 
 def sales_tax_per_sell(sells: pd.DataFrame, fees: pd.DataFrame, est_rate: float) -> pd.Series:
@@ -193,7 +310,10 @@ class PnlResult:
 
 def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
             window_days: int, tol_sec: int, sales_tax_rate: float,
-            now: datetime | None = None) -> PnlResult:
+            now: datetime | None = None,
+            open_sell_units: pd.Series | None = None) -> PnlResult:
+    """open_sell_units: type_id -> units currently listed in open sell orders
+    (they still carry a share of the sell-order fees already paid)."""
     now = now or datetime.now(timezone.utc)
     start = now - timedelta(days=window_days)
 
@@ -202,29 +322,31 @@ def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
     sells["sales_tax"], tax_linked = sales_tax_per_sell(sells, fees, sales_tax_rate)
     sells["known_share"] = (sells["known_qty"] / sells["quantity"]).fillna(0)
 
-    attr = attribute_order_fees(fees, orders, tol_sec)
+    attr = attribute_order_fees(fees, orders, tol_sec, tx)
     matched = attr[attr["matched"]]
     buy_fees_by_type = matched[matched["is_buy_order"] == True].groupby("type_id")["fee"].sum()  # noqa: E712
     units_bought = tx[tx["is_buy"].astype(bool)].groupby("type_id")["quantity"].sum()
     buy_fee_per_unit = (buy_fees_by_type / units_bought).dropna()
     sells["buy_fees_cap"] = sells["type_id"].map(buy_fee_per_unit).fillna(0) * sells["known_qty"]
 
-    # Sell-side order fees are period costs per type, assigned to that type's
-    # sells in the same window pro rata by revenue; then split known/unknown.
-    sell_fees = matched[matched["is_buy_order"] == False].copy()  # noqa: E712
+    # Sell-side order fees (placement + every reprice) are also spread per unit
+    # and realized on sale: fees / (units sold + units still listed). A big
+    # sell order pays its whole broker fee upfront — expensing it on the few
+    # units that happened to sell this week overstated per-item fees (500MN
+    # MWD I: 7.6M fees on 37 of ~330 listed units). Fees on units still
+    # listed stay deferred until they sell.
+    sell_fees_by_type = matched[matched["is_buy_order"] == False].groupby("type_id")["fee"].sum()  # noqa: E712
+    units_sold = tx[~tx["is_buy"].astype(bool)].groupby("type_id")["quantity"].sum()
+    listed = units_sold.add(open_sell_units if open_sell_units is not None else pd.Series(dtype=float),
+                            fill_value=0)
+    sell_fee_per_unit = (sell_fees_by_type / listed[listed > 0]).dropna()
+    sells["sell_fees"] = sells["type_id"].map(sell_fee_per_unit).fillna(0) * sells["quantity"]
 
     def window_frame(lo, hi):
-        s = sells[(sells["date"] >= lo) & (sells["date"] < hi)].copy()
-        sf = sell_fees[(sell_fees["date"] >= lo) & (sell_fees["date"] < hi)]
-        sf_by_type = sf.groupby("type_id")["fee"].sum()
-        rev_by_type = s.groupby("type_id")["revenue"].transform("sum")
-        s["sell_fees"] = s["type_id"].map(sf_by_type).fillna(0) * (s["revenue"] / rev_by_type).fillna(0)
-        sold_types = set(s["type_id"])
-        sell_fees_no_sale = float(sf_by_type[~sf_by_type.index.isin(sold_types)].sum())
-        return s, sell_fees_no_sale
+        return sells[(sells["date"] >= lo) & (sells["date"] < hi)].copy()
 
     def statement(lo, hi):
-        s, sell_fees_no_sale = window_frame(lo, hi)
+        s = window_frame(lo, hi)
         k = s["known_share"]
         revenue = (s["revenue"] * k).sum()
         cogs = s["cogs"].sum()
@@ -238,16 +360,19 @@ def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
         # Buy fees on types never bought (cancelled/unfilled orders) can't be capitalized.
         a_buy = a_win[a_win["matched"] & (a_win["is_buy_order"] == True)]  # noqa: E712
         uncapitalizable = a_buy.loc[~a_buy["type_id"].isin(buy_fee_per_unit.index), "fee"].sum()
+        a_sell = a_win[a_win["matched"] & (a_win["is_buy_order"] == False)]  # noqa: E712
+        sell_uncap = a_sell.loc[~a_sell["type_id"].isin(sell_fee_per_unit.index), "fee"].sum()
         tax_residual = f_win.loc[f_win["ref_type"] == TAX_TYPE, "fee"].sum() - s["sales_tax"].sum()
 
         unknown_rev = (s["revenue"] * (1 - k)).sum()
         unknown_costs = (s["sales_tax"] * (1 - k)).sum() + (s["sell_fees"] * (1 - k)).sum()
 
-        net = (revenue - cogs - buy_cap - tax - sfees - sell_fees_no_sale
+        net = (revenue - cogs - buy_cap - tax - sfees - sell_uncap
                - unmatched_order_fees - uncapitalizable - tax_residual)
         return s, {
             "revenue": revenue, "cogs": cogs, "buy_cap": buy_cap, "tax": tax,
-            "sell_fees": sfees, "sell_fees_no_sale": sell_fees_no_sale,
+            "sell_fees": sfees, "sell_uncap": sell_uncap,
+            "fees_paid": f_win.loc[f_win["ref_type"] != TAX_TYPE, "fee"].sum(),
             "unmatched_order_fees": unmatched_order_fees,
             "uncapitalizable": uncapitalizable, "tax_residual": tax_residual,
             "unknown_rev": unknown_rev, "unknown_costs": unknown_costs,
@@ -269,15 +394,16 @@ def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
         ("− Nákupní poplatky v ceně prodaného zboží", -st["buy_cap"]),
         ("= Hrubý zisk", gross),
         ("− Daň z prodeje", -st["tax"]),
-        ("− Poplatky za prodejní ordery (prodané položky)", -st["sell_fees"]),
-        ("− Poplatky za prodejní ordery (bez prodeje v okně)", -st["sell_fees_no_sale"]),
+        ("− Prodejní poplatky na prodané kusy", -st["sell_fees"]),
         ("− Poplatky za nákupní ordery bez jediného nákupu", -st["uncapitalizable"]),
-        ("− Nepřiřazené poplatky (order nenalezen)", -st["unmatched_order_fees"]),
+        ("− Poplatky za prodejní ordery bez prodeje i nabídky", -st["sell_uncap"]),
+        ("− Nepřiřazené poplatky (bez orderu i fillu)", -st["unmatched_order_fees"]),
         ("− Rozdíl daně (skutečnost vs. přiřazeno)", -st["tax_residual"]),
         ("= ČISTÝ REALIZOVANÝ ZISK", st["net"]),
         ("info: tržby bez známého nákladu (mimo zisk)", st["unknown_rev"]),
         ("info: z toho daň + poplatky (mimo zisk)", -st["unknown_costs"]),
         ("info: nákupy v okně (cash)", -buy_spend),
+        ("info: broker/SCC poplatky stržené v okně (cash)", -st["fees_paid"]),
         ("info: peněžní tok z obchodování (stará metrika)", cash_flow),
     ], columns=["line", "isk"])
 
@@ -319,10 +445,14 @@ def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
 
     # ---- coverage diagnostics ---------------------------------------------
     order_fee_total = attr["fee"].sum()
+    pct = lambda m: (attr.loc[attr["method"] == m, "fee"].sum() / order_fee_total * 100) if order_fee_total else None
     coverage = {
         "order_fee_isk_matched_pct": (attr.loc[attr["matched"], "fee"].sum() / order_fee_total * 100)
                                      if order_fee_total else None,
+        "order_fee_by_order_pct": pct("order"),
+        "order_fee_by_fill_pct": pct("fill"),
         "order_fee_entries_unmatched": int(attr.loc[~attr["matched"], "journal_id"].nunique()),
+        "perimeter_scc_new_rate_derived": derived_perimeter_scc_new_rate(fees, orders, tol_sec),
         "sales_tax_linked_pct": (tax_linked.mean() * 100) if len(tax_linked) else None,
         "unknown_cost_units_window": st["unknown_units"],
     }
@@ -352,7 +482,8 @@ def build_pnl(client) -> PnlResult:
     orders = _utc(bq.query_df(client, ORDER_EVENTS_SQL), "issued")
     if not tx.empty:
         tx["is_buy"] = tx["is_buy"].fillna(False).astype(bool)
-    res = compute(tx, fees, orders,
+    open_sell = bq.query_df(client, OPEN_SELL_UNITS_SQL).set_index("type_id")["units"]
+    res = compute(tx, fees, orders, open_sell_units=open_sell,
                   window_days=config.PNL_WINDOW_DAYS,
                   tol_sec=config.PNL_FEE_MATCH_TOLERANCE_SEC,
                   sales_tax_rate=config.SALES_TAX_RATE)
@@ -360,9 +491,15 @@ def build_pnl(client) -> PnlResult:
     print(f"[pnl] okno {res.window_start:%d.%m %H:%M} – {res.window_end:%d.%m %H:%M} UTC, "
           f"čistý zisk {net_profit(res):,.0f} ISK, {len(res.items)} prodaných položek")
     print(f"[pnl] coverage: order fee ISK přiřazeno {c['order_fee_isk_matched_pct'] or 0:.1f}% "
-          f"({c['order_fee_entries_unmatched']} nepřiřazených záznamů), "
+          f"(order {c['order_fee_by_order_pct'] or 0:.1f}% + dopočet z fillů {c['order_fee_by_fill_pct'] or 0:.1f}%; "
+          f"{c['order_fee_entries_unmatched']} záznamů nepřiřazeno), "
           f"daň linkovaná {c['sales_tax_linked_pct'] or 0:.1f}%, "
           f"kusy bez známého nákladu v okně: {c['unknown_cost_units_window']}")
+    d = c["perimeter_scc_new_rate_derived"]
+    print(f"[pnl] SCC nový order v Perimeteru: config {config.PERIMETER_SCC_NEW_RATE:.4%}, "
+          f"z dat {'n/a' if d is None else f'{d:.4%}'}"
+          + ("  <-- uprav config.PERIMETER_SCC_NEW_RATE"
+             if d is not None and abs(d - config.PERIMETER_SCC_NEW_RATE) > 0.0005 else ""))
     return res
 
 
