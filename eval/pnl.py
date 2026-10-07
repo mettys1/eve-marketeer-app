@@ -222,7 +222,8 @@ def attribute_order_fees(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int,
     Columns: journal_id, date, ref_type, fee, type_id, is_buy_order, method,
     matched (method != "none").
     """
-    cols = ["journal_id", "date", "ref_type", "fee", "type_id", "is_buy_order", "method", "matched"]
+    cols = ["journal_id", "date", "ref_type", "fee", "type_id", "is_buy_order", "method",
+            "full_fee", "n_targets", "matched"]
     f = fees[fees["ref_type"].isin(ORDER_FEE_TYPES)].copy()
     if f.empty:
         return pd.DataFrame(columns=cols).astype({"fee": float, "matched": bool})
@@ -246,13 +247,23 @@ def attribute_order_fees(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int,
     for r in f.itertuples(index=False):
         c = cand_by_j.get(r.journal_id)
         if c is not None and not c.empty:
-            ok = c[[_amount_ok(r.fee, e) for e in c["exp_" + r.ref_type]]]
-            c = ok if not ok.empty else c
+            exp = c["exp_" + r.ref_type]
+            ok = c[[_amount_ok(r.fee, e) for e in exp]]
+            if ok.empty and exp.notna().all() and r.fee > config.PNL_FEE_REJECT_RATIO * max(
+                    exp.max(), config.PNL_FEE_AMOUNT_TOL_ISK):
+                # The fee is several times bigger than anything these orders
+                # could have cost: the order it belongs to was never polled and
+                # these are just neighbours placed in the same seconds. Don't
+                # dump e.g. a 4M fee onto a 13k order — try fills instead.
+                c = None
+            else:
+                c = ok if not ok.empty else c
+        if c is not None and not c.empty:
             w = c["order_value"]
             w = w / w.sum() if w.sum() > 0 else pd.Series(1.0 / len(c), index=c.index)
             for (_, o_row), share in zip(c.iterrows(), w):
                 rows.append((r.journal_id, r.date, r.ref_type, r.fee * share,
-                             o_row["type_id"], bool(o_row["is_buy_order"]), "order"))
+                             o_row["type_id"], bool(o_row["is_buy_order"]), "order", r.fee, len(c)))
             continue
 
         if fills is not None:
@@ -262,10 +273,10 @@ def attribute_order_fees(fees: pd.DataFrame, orders: pd.DataFrame, tol_sec: int,
             if not g.empty and g["value"].sum() > 0:
                 for fr, share in zip(g.itertuples(index=False), g["value"] / g["value"].sum()):
                     rows.append((r.journal_id, r.date, r.ref_type, r.fee * share,
-                                 fr.type_id, bool(fr.is_buy), "fill"))
+                                 fr.type_id, bool(fr.is_buy), "fill", r.fee, len(g)))
                 continue
 
-        rows.append((r.journal_id, r.date, r.ref_type, r.fee, pd.NA, pd.NA, "none"))
+        rows.append((r.journal_id, r.date, r.ref_type, r.fee, pd.NA, pd.NA, "none", r.fee, 0))
 
     out = pd.DataFrame(rows, columns=cols[:-1])
     out["matched"] = out["method"] != "none"
@@ -306,6 +317,7 @@ class PnlResult:
     coverage: dict             # diagnostics
     window_start: datetime
     window_end: datetime
+    fee_attribution: pd.DataFrame | None = None  # per (journal entry, item) — for --fees diagnostics
 
 
 def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
@@ -457,7 +469,7 @@ def compute(tx: pd.DataFrame, fees: pd.DataFrame, orders: pd.DataFrame,
         "unknown_cost_units_window": st["unknown_units"],
     }
 
-    return PnlResult(company, items, daily, coverage, start, now)
+    return PnlResult(company, items, daily, coverage, start, now, attr)
 
 
 def net_profit(res: PnlResult) -> float:
@@ -506,7 +518,23 @@ def build_pnl(client) -> PnlResult:
 if __name__ == "__main__":
     # Standalone: python -m eval.pnl  — prints both tables, no dashboard.
     pd.set_option("display.width", 200, "display.max_columns", 20, "display.float_format", "{:,.0f}".format)
+    import sys
     r = build_pnl(bq.get_client())
+    if len(sys.argv) > 2 and sys.argv[1] == "--fees":
+        # python -m eval.pnl --fees "Guidance Disruptor II"
+        # Every broker/SCC journal entry that landed (fully or partly) on that item.
+        name = sys.argv[2].lower()
+        type_ids = set(bq.query_df(bq.get_client(), f"""
+            select distinct type_id from `{config.TABLE_WALLET_TRANSACTIONS}`
+            where lower(item_name) = '{name.replace("'", "")}'""")["type_id"])
+        a = r.fee_attribution
+        a = a[a["type_id"].isin(type_ids)].sort_values("date")
+        print(a[["date", "ref_type", "is_buy_order", "method", "full_fee", "n_targets", "fee"]]
+              .rename(columns={"fee": "share_to_item"}).to_string(index=False))
+        print(f"\nCelkem na položku: {a['fee'].sum():,.0f} ISK z {len(a)} záznamů "
+              f"(order: {a.loc[a.method == 'order', 'fee'].sum():,.0f}, "
+              f"fill: {a.loc[a.method == 'fill', 'fee'].sum():,.0f})")
+        sys.exit(0)
     print(r.company.to_string(index=False))
     print()
     print(r.items.to_string(index=False))

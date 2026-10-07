@@ -82,8 +82,9 @@ def test_unknown_lot_is_oldest_stock():
 
 def test_fee_split_between_orders_in_same_second():
     f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 100.0, None, None)])
-    o = orders([(1, T("2026-10-01 08:00"), 1, "a", True, 300.0),
-                (2, T("2026-10-01 08:00"), 2, "b", True, 100.0)])
+    # two Perimeter orders, flat 100 ISK each matches both -> split by order value
+    o = orders([(1, T("2026-10-01 08:00"), 1, "a", True, 0, PER, 300.0, 1, 1),
+                (2, T("2026-10-01 08:00"), 2, "b", True, 0, PER, 100.0, 1, 1)])
     a = pnl.attribute_order_fees(f, o, 2)
     assert sorted(a.fee) == [25.0, 75.0]
 
@@ -139,3 +140,11 @@ def test_range_fill_at_other_npc_station_gets_fee():
     f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 13.82, None, None)])
     a = pnl.attribute_order_fees(f, orders([]), 5, t)
     assert list(a.method) == ["fill"] and list(a.type_id) == [5]
+
+def test_time_match_rejected_when_fee_far_exceeds_expected():
+    # 4M Jita broker fee in the same second as a tiny polled order -> not that order
+    o = orders([(1, T("2026-10-01 08:00"), 1, "tiny", True, 0, JITA, 1000.0, 10, 10)])  # exp 138
+    t = tx([(1, T("2026-10-01 08:30"), 2, "big", 1, 300e6, True, JITA)])
+    f = fees([(1, T("2026-10-01 08:00"), "brokers_fee", 4.1e6, None, None)])
+    a = pnl.attribute_order_fees(f, o, 5, t)
+    assert list(a.method) == ["fill"] and list(a.type_id) == [2]

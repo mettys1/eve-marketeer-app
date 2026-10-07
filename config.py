@@ -244,6 +244,11 @@ PNL_FEE_MATCH_TOLERANCE_SEC = 5
 # must be within max(ISK, %) of the expected fee to confirm an order match.
 PNL_FEE_AMOUNT_TOL_ISK = 1.0
 PNL_FEE_AMOUNT_TOL_PCT = 2.0
+# If no time-candidate order matches the amount AND the actual fee is more
+# than this many times the largest expected fee of those candidates, the time
+# match is rejected (the real order was never polled; the candidates are just
+# neighbours placed the same second) and the fee goes to fill allocation.
+PNL_FEE_REJECT_RATIO = 3.0
 # Fee entries with no order in my_orders are allocated to this character's
 # fills at the implied location within this many hours AFTER the fee.
 PNL_FEE_FILL_WINDOW_HOURS = 24
@@ -255,10 +260,10 @@ JITA_STATION_ID = 60003760
 # SCC surcharge on a NEW order in Perimeter (Matej 2026-10-06: Perimeter has
 # no % order commission, only the flat 100 ISK + SCC). Only the REPRICE SCC
 # formula is verified (REPRICE_SCC_* above); this new-order rate is a STARTER
-# GUESS = 0.1% value part + 0.5% "delta from 0". Every `python -m eval.pnl`
-# / run_eval prints the rate derived from the real journal — replace this
-# with that number.
-PERIMETER_SCC_NEW_RATE = 0.006
+# Derived from the real journal 2026-10-06 (median over unambiguous new
+# Perimeter orders): 0.5% — i.e. just the 0.5% "escrow delta from 0" part of
+# the reprice formula, no 0.1% value part. Run log keeps re-checking it.
+PERIMETER_SCC_NEW_RATE = 0.005
 
 # --- Dashboard ------------------------------------------------------------
 DASHBOARD_DEFAULT_WINDOW_DAYS = 30
