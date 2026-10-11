@@ -13,18 +13,20 @@ const CREDENTIALS_SECRET_NAME = process.env.CREDENTIALS_SECRET_NAME || 'esi-cred
 const CLIENT_ID = process.env.EVE_SSO_CLIENT_ID;
 const CLIENT_SECRET = process.env.EVE_SSO_CLIENT_SECRET;
 
-async function loadCredentials() {
+// secretName param added 2026-10-11 for esi-cj-poller: the C-J Keepstar market may need a
+// different character than the trading one (Perimeter/my_orders/wallet). Default unchanged.
+async function loadCredentials(secretName = CREDENTIALS_SECRET_NAME) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     throw new Error('EVE_SSO_CLIENT_ID / EVE_SSO_CLIENT_SECRET env vars are missing on this job.');
   }
   const client = new SecretManagerServiceClient();
-  const name = `projects/${GCP_PROJECT_ID}/secrets/${CREDENTIALS_SECRET_NAME}/versions/latest`;
+  const name = `projects/${GCP_PROJECT_ID}/secrets/${secretName}/versions/latest`;
   let version;
   try {
     [version] = await client.accessSecretVersion({ name });
   } catch (err) {
     throw new Error(
-      `Couldn't read Secret Manager secret "${CREDENTIALS_SECRET_NAME}" (${err.message}). ` +
+      `Couldn't read Secret Manager secret "${secretName}" (${err.message}). ` +
       'Has anyone logged in via the esi-oauth-service URL yet? See esi-oauth-service/README.md.'
     );
   }

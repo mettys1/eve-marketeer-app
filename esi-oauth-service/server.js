@@ -43,6 +43,7 @@ const BQ_DATASET = process.env.BQ_DATASET || 'eve_jita_scanner';
 // already logged in from before this needs to re-visit /login to pick up the new scope
 // (EVE SSO won't silently widen an existing grant) — also re-tick the matching
 // checkbox on the app in developers.eveonline.com if it's not already enabled there.
+const LOGIN_TARGETS = { cj: `${CREDENTIALS_SECRET_NAME}-cj` };
 const SCOPES = 'esi-markets.read_character_orders.v1 esi-markets.structure_markets.v1 esi-wallet.read_character_wallet.v1';
 const SSO_BASE = 'https://login.eveonline.com';
 const STATE_COLLECTION = 'oauth_pending';
@@ -417,8 +418,20 @@ async function handleLogin(req, reqUrl, res) {
   const codeChallenge = base64url(crypto.createHash('sha256').update(codeVerifier).digest());
   const state = base64url(crypto.randomBytes(16));
 
+  // ?target=cj (added 2026-10-11) stores the token in a SEPARATE secret
+  // (<CREDENTIALS_SECRET_NAME>-cj) for esi-cj-poller, so logging in with a character that
+  // has C-J Keepstar market access never overwrites the trading character's token used by
+  // the Perimeter / my_orders / wallet jobs. Whitelisted — no free-form secret names.
+  const target = reqUrl.searchParams.get('target') || '';
+  if (target && !LOGIN_TARGETS[target]) {
+    res.writeHead(400, { 'Content-Type': 'text/html' });
+    res.end(html(`<h1>Unknown target</h1><p>Allowed: ${Object.keys(LOGIN_TARGETS).join(', ')}</p>`));
+    return;
+  }
+
   await firestore.collection(STATE_COLLECTION).doc(state).set({
     code_verifier: codeVerifier,
+    target,
     created_at: Firestore.Timestamp.now(),
   });
 
@@ -455,7 +468,8 @@ async function handleCallback(req, reqUrl, res) {
     res.end(html('<h1>Unknown or expired state</h1><p>Start over from <a href="/login">/login</a> — PKCE states expire after 10 minutes.</p>'));
     return;
   }
-  const { code_verifier: codeVerifier } = stateDoc.data();
+  const { code_verifier: codeVerifier, target = '' } = stateDoc.data();
+  const secretName = target ? LOGIN_TARGETS[target] : CREDENTIALS_SECRET_NAME;
   await stateDoc.ref.delete(); // one-time use
 
   const redirectUri = `https://${req.headers.host}/callback`;
@@ -483,7 +497,7 @@ async function handleCallback(req, reqUrl, res) {
   const characterId = Number(String(payload.sub).split(':').pop());
   const characterName = payload.name;
 
-  const parent = `projects/${GCP_PROJECT_ID}/secrets/${CREDENTIALS_SECRET_NAME}`;
+  const parent = `projects/${GCP_PROJECT_ID}/secrets/${secretName}`;
   const payloadData = Buffer.from(JSON.stringify({
     character_id: characterId,
     character_name: characterName,
@@ -498,7 +512,7 @@ async function handleCallback(req, reqUrl, res) {
       // normally; this fallback creates it on the fly so a fresh setup still works.
       await secretClient.createSecret({
         parent: `projects/${GCP_PROJECT_ID}`,
-        secretId: CREDENTIALS_SECRET_NAME,
+        secretId: secretName,
         secret: { replication: { automatic: {} } },
       });
       await secretClient.addSecretVersion({ parent, payload: { data: payloadData } });
@@ -508,7 +522,7 @@ async function handleCallback(req, reqUrl, res) {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/html' });
-  res.end(html(`<h1>Logged in as ${characterName}</h1><p>Refresh token saved to Secret Manager (<code>${CREDENTIALS_SECRET_NAME}</code>). You can close this tab — the esi-jobs Cloud Run Jobs will pick it up from here.</p>`));
+  res.end(html(`<h1>Logged in as ${characterName}</h1><p>Refresh token saved to Secret Manager (<code>${secretName}</code>). You can close this tab — the esi-jobs Cloud Run Jobs will pick it up from here.</p>`));
 }
 
 const server = http.createServer(async (req, res) => {

@@ -265,6 +265,61 @@ JITA_STATION_ID = 60003760
 # the reprice formula, no 0.1% value part. Run log keeps re-checking it.
 PERIMETER_SCC_NEW_RATE = 0.005
 
+# --- C-J6MT import pipeline (run_cj.py) — added 2026-10-11 -------------------
+# Separate pipeline, run AFTER run_eval.py: Jita price vs C-J Keepstar market,
+# m3-based shipping, suggests what to haul to C-J. Values marked TODO are
+# placeholders — the dashboard prints a warning banner while any is unset.
+TABLE_CJ_ORDERS_RAW = f"{PROJECT_ID}.{DATASET}.cj_orders_raw"
+TABLE_CJ_JITA_ORDERS_RAW = f"{PROJECT_ID}.{DATASET}.cj_jita_orders_raw"
+TABLE_CJ_DELVE_HISTORY = f"{PROJECT_ID}.{DATASET}.cj_delve_history"
+TABLE_CJ_RUNS = f"{PROJECT_ID}.{DATASET}.cj_runs"
+TABLE_TYPE_INFO = f"{PROJECT_ID}.{DATASET}.type_info"
+CJ_CLOUD_RUN_JOB = "esi-cj-poller"
+
+# "C-J6MT - 1st Taj Mahgoon" (showinfo:35834//1049588174021, Matej 2026-10-11).
+# Must match CJ_STRUCTURE_ID in deploy_cj.sh.
+CJ_STRUCTURE_ID = 1049588174021
+# Must match CJ_CATEGORY_IDS in deploy_cj.sh. 7 = Module (rigs included).
+CJ_CATEGORY_IDS = [7]
+
+# Shipping Jita -> C-J: ISK per m3 (PACKAGED volume), no collateral (Matej 2026-10-11).
+# 800 ISK/m3 confirmed by Matej 2026-10-11.
+CJ_SHIPPING_ISK_PER_M3 = 800.0
+# Max m3 per haul — caps the suggestion to one load. None = no cap.
+CJ_MAX_CARGO_M3 = None
+
+# Selling in C-J — from Matej's in-game sell window in 1st Taj Mahgoon, 2026-10-11
+# (Large Capacitor Control Circuit II @ 52.23M, all three lines checked to the ISK):
+#   SCC surcharge 0.5% + Broker's fee 1.5% = 2.0% (broker side), Sales tax 4.2%.
+# The in-game window showed 4.2% sales tax (Accounting still training on that char); Matej
+# 2026-10-11: use the trained-out rate, same as SALES_TAX_RATE above.
+CJ_SALES_TAX_RATE = SALES_TAX_RATE
+
+# Budget for one C-J haul (ISK spent in Jita). STARTER GUESS.
+CJ_BUDGET_ISK = 500_000_000
+CJ_PER_POSITION_PCT = 0.20          # max share of the budget per item
+CJ_TOP_N = 15                       # "nízký počet modulů"
+CJ_MIN_MARGIN_PCT = 15.0            # net, after shipping + fees; capital sits in transit -> higher than station trading
+CJ_MARGIN_CEILING_PCT = 300.0       # above -> almost certainly a pricing artifact (one troll order)
+CJ_STOCK_DAYS = 7                   # haul enough for N days of estimated C-J demand
+CJ_MAX_COMPETITOR_DAYS = 30         # skip if C-J sell stock already covers > N days of demand
+
+# Demand estimate — primary: diffs of consecutive cj_orders_raw snapshots (sell side).
+CJ_FILL_WINDOW_DAYS = 7
+CJ_MAX_PAIR_GAP_HOURS = 30          # snapshot pairs further apart are ignored (too blind)
+CJ_MIN_COVERAGE_HOURS = 12          # less observed time than this -> fall back to Delve
+# Orders that vanish between two snapshots (not expired): sold out OR cancelled — we
+# can't tell. Counted at this share. STARTER GUESS; hourly snapshots make it matter less.
+CJ_DISAPPEARED_FILL_SHARE = 0.7
+# Fallback: Delve region 14d avg daily volume x this share. Delve includes 1DQ1-A, which
+# is bigger than C-J, so the share is well below 1. STARTER GUESS — calibrate against the
+# snapshot estimate once a week of snapshots exists (dashboard shows both side by side).
+CJ_DELVE_SHARE = 0.3
+
+# Variant A (buy now from sell orders) also walks Perimeter sells, not only Jita system.
+CJ_INCLUDE_PERIMETER_SELLS = True
+PERIMETER_SYSTEM_ID = 30000144
+
 # --- Dashboard ------------------------------------------------------------
 DASHBOARD_DEFAULT_WINDOW_DAYS = 30
 DASHBOARD_OUTPUT_DIR = Path(__file__).parent / "output"

@@ -73,3 +73,9 @@ against the real tables before trusting any output:
 
 None of the four core decisions above are affected by these TODOs — they're
 schema plumbing, not logic changes.
+
+## C-J6MT import pipeline (2026-10-11)
+
+Separate pipeline run after `run_eval.py`: `python run_cj.py`. It compares Jita against
+the C-J Keepstar market, calculates m3-based shipping and suggests what to haul to C-J.
+Setup and methodology are in [docs/cj-pipeline.md](docs/cj-pipeline.md).
