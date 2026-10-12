@@ -49,7 +49,7 @@ def test_demand_snapshots_vs_fallback():
     d, src = estimate_demand(partial=10, disappeared=10, covered_hours=24, delve_daily=100)
     assert d == pytest.approx(10 + 0.7 * 10) and src == "C-J snapshoty"
     d, src = estimate_demand(partial=0, disappeared=0, covered_hours=2, delve_daily=100)
-    assert d == pytest.approx(100 * config.CJ_DELVE_SHARE) and src.startswith("Delve")
+    assert d == pytest.approx(100 * config.CJ_REGION_SHARE) and src.startswith(config.CJ_REGION_NAME)
     d, src = estimate_demand(0, 0, 2, None)
     assert d == 0 and src == "žádná data"
 
@@ -88,7 +88,8 @@ def _frames():
 
 
 def test_build_recommendations():
-    recs, instant, gaps, rejected = build_recommendations(*_frames(), covered_hours=48)
+    cj_buys = pd.DataFrame([dict(type_id=4, price=3_000_000.0, volume_remain=4, min_volume=1)])
+    recs, instant, gaps, rejected = build_recommendations(*_frames(), covered_hours=48, cj_buys=cj_buys)
     assert list(recs.name) == ["Good Module"]
     r = recs.iloc[0]
     # demand 48 units / 48 h = 24/day -> 7 days = 168 - my 6 = 162, but Jita has 100
@@ -131,3 +132,27 @@ def test_render(tmp_path, monkeypatch):
     out = dashboard.render(res, open_browser=False)
     text = out.read_text(encoding="utf-8")
     assert "Good Module\t100" in text and "test warn" in text
+
+
+def test_instant_fill_walks_buy_book():
+    # top order 25M x10, next 21M x20; Jita 20M x100, ship 0, tax 0 -> only the top order clears 15%
+    import config as c
+    c_tax = c.CJ_SALES_TAX_RATE
+    c.CJ_SALES_TAX_RATE = 0.0
+    try:
+        r = analysis.instant_fill([(25e6, 10, 1), (21e6, 20, 1)], [(20e6, 100)], 0.0)
+    finally:
+        c.CJ_SALES_TAX_RATE = c_tax
+    assert r["units"] == 10 and r["cj_buy_worst"] == 25e6
+    assert r["profit_total"] == pytest.approx(10 * 5e6)
+
+
+def test_instant_fill_respects_min_volume():
+    assert analysis.instant_fill([(30e6, 50, 50)], [(20e6, 10)], 0.0) is None
+
+
+def test_unaffordable_rows_dropped_not_shown_as_zero(monkeypatch):
+    monkeypatch.setattr(config, "CJ_BUDGET_ISK", 1_000_000)  # per position 200k < 1M unit price
+    recs, _, _, rejected = build_recommendations(*_frames(), covered_hours=48)
+    assert recs.empty
+    assert rejected["1 ks nad strop pozice/rozpočet"] == 1

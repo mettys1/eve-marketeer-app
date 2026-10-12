@@ -15,6 +15,7 @@ Read-only like run_eval.py: nothing is placed/cancelled in-game.
 
 import argparse
 import sys
+import warnings
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -22,6 +23,9 @@ import pandas as pd
 import config
 from eval import bq, refresh
 from cj import analysis, dashboard
+
+# Harmless: without google-cloud-bigquery-storage, results come over REST (slower, same data).
+warnings.filterwarnings("ignore", message="BigQuery Storage module not found")
 
 
 def main() -> int:

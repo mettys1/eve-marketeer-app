@@ -12,10 +12,12 @@
 //      If the main eve-jita-poller scan is fresh (<= CJ_JITA_REUSE_HOURS), types it already
 //      covered are reused from market_orders_raw and only the missing ones are fetched;
 //      otherwise everything is fetched                          -> cj_jita_orders_raw
-//   4. Delve region market history (14d avg volume) for the same types, at most once per
-//      type per day — this is only the FALLBACK demand estimate (Delve = 1DQ + C-J + ...,
-//      so it overstates C-J demand); the primary estimate comes from snapshot diffs of
-//      cj_orders_raw, computed in Python                        -> cj_delve_history
+//   4. Market history (14d avg volume) of the region C-J6MT is in, at most once per type per
+//      day — FALLBACK demand estimate only; the primary estimate comes from snapshot diffs
+//      of cj_orders_raw, computed in Python. The region is resolved from the system name
+//      (CJ_SYSTEM_NAME, default C-J6MT -> Insmother) unless CJ_REGION_ID is set. Fixed
+//      2026-10-12: was hardcoded to Delve, which is wrong — C-J is not in Delve.
+//      (Table keeps its historical name.)                       -> cj_delve_history
 //   5. One bookkeeping row                                      -> cj_runs
 //
 // CJ_MODE=orders_only does just step 1 (+5) — cheap, for an optional hourly schedule that
@@ -39,7 +41,8 @@ const CONCURRENCY = Number(process.env.CJ_CONCURRENCY || 8);
 const HISTORY_DAYS = Number(process.env.CJ_HISTORY_DAYS || 14);
 
 const FORGE_REGION_ID = 10000002;
-const DELVE_REGION_ID = 10000060;
+const SYSTEM_NAME = process.env.CJ_SYSTEM_NAME || 'C-J6MT';
+const REGION_ID_OVERRIDE = Number(process.env.CJ_REGION_ID || 0);
 
 const T = (name) => `${GCP_PROJECT_ID}.${BQ_DATASET}.${name}`;
 
@@ -189,23 +192,37 @@ async function fetchJitaBooks(bq, typeIds, runAt) {
 }
 
 // --- step 4 -------------------------------------------------------------------------------
-async function fetchDelveHistory(bq, typeIds) {
+async function resolveRegion() {
+  if (REGION_ID_OVERRIDE) return { regionId: REGION_ID_OVERRIDE, regionName: null };
+  const res = await fetch(`${ESI_BASE}/universe/ids/?datasource=tranquility`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([SYSTEM_NAME]),
+  });
+  if (!res.ok) throw new Error(`universe/ids failed (${res.status}): ${await res.text()}`);
+  const sys = ((await res.json()).systems || [])[0];
+  if (!sys) throw new Error(`System "${SYSTEM_NAME}" not found via /universe/ids — set CJ_REGION_ID explicitly.`);
+  const { data: s } = await esiGet(`${ESI_BASE}/universe/systems/${sys.id}/?datasource=tranquility`);
+  const { data: c } = await esiGet(`${ESI_BASE}/universe/constellations/${s.constellation_id}/?datasource=tranquility`);
+  const { data: r } = await esiGet(`${ESI_BASE}/universe/regions/${c.region_id}/?datasource=tranquility`);
+  return { regionId: c.region_id, regionName: r.name };
+}
+
+async function fetchRegionHistory(bq, typeIds, regionId) {
   if (!typeIds.length) return 0;
   const done = await query(bq, `
     SELECT DISTINCT type_id FROM \`${T('cj_delve_history')}\`
-    WHERE fetched_date = CURRENT_DATE() AND type_id IN UNNEST(@ids)`, { ids: typeIds });
+    WHERE fetched_date = CURRENT_DATE() AND region_id = @rid AND type_id IN UNNEST(@ids)`, { ids: typeIds, rid: regionId });
   const doneSet = new Set(done.map((r) => Number(r.type_id)));
   const toFetch = typeIds.filter((id) => !doneSet.has(id));
-  console.log(`Delve history: ${doneSet.size} already fetched today, ${toFetch.length} to fetch.`);
+  console.log(`Region ${regionId} history: ${doneSet.size} already fetched today, ${toFetch.length} to fetch.`);
   const today = new Date().toISOString().slice(0, 10);
   const cutoff = new Date(Date.now() - HISTORY_DAYS * 86400e3).toISOString().slice(0, 10);
   const rows = (await mapWithConcurrency(toFetch, Math.min(CONCURRENCY, 6), async (typeId) => {
-    const { data } = await esiGet(`${ESI_BASE}/markets/${DELVE_REGION_ID}/history/?datasource=tranquility&type_id=${typeId}`);
+    const { data } = await esiGet(`${ESI_BASE}/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`);
     const recent = (data || []).filter((h) => h.date >= cutoff);
     const vol = recent.reduce((s, h) => s + h.volume, 0);
     const isk = recent.reduce((s, h) => s + h.volume * h.average, 0);
     return {
-      fetched_date: today, type_id: typeId,
+      fetched_date: today, type_id: typeId, region_id: regionId,
       avg_daily_volume: vol / HISTORY_DAYS,
       avg_price: vol > 0 ? isk / vol : null,
       days_with_trades: recent.length, window_days: HISTORY_DAYS,
@@ -246,8 +263,10 @@ async function main() {
     console.log('[3] Jita order books...');
     const jita = await fetchJitaBooks(bq, selected, runAt);
 
-    console.log('[4] Delve history (fallback demand)...');
-    const delveFetched = await fetchDelveHistory(bq, selected);
+    const region = await resolveRegion();
+    console.log(`[4] ${SYSTEM_NAME} is in region ${region.regionName || '?'} (${region.regionId}) — history (fallback demand)...`);
+    const delveFetched = await fetchRegionHistory(bq, selected, region.regionId);
+    run.region_id = region.regionId;
 
     Object.assign(run, {
       cj_types: allTypes.length, selected_types: selected.length,

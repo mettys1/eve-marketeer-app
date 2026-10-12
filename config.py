@@ -291,6 +291,7 @@ CJ_MAX_CARGO_M3 = None
 # Selling in C-J — from Matej's in-game sell window in 1st Taj Mahgoon, 2026-10-11
 # (Large Capacitor Control Circuit II @ 52.23M, all three lines checked to the ISK):
 #   SCC surcharge 0.5% + Broker's fee 1.5% = 2.0% (broker side), Sales tax 4.2%.
+CJ_SELL_BROKER_FEE_RATE = 0.005 + 0.015
 # The in-game window showed 4.2% sales tax (Accounting still training on that char); Matej
 # 2026-10-11: use the trained-out rate, same as SALES_TAX_RATE above.
 CJ_SALES_TAX_RATE = SALES_TAX_RATE
@@ -307,14 +308,17 @@ CJ_MAX_COMPETITOR_DAYS = 30         # skip if C-J sell stock already covers > N 
 # Demand estimate — primary: diffs of consecutive cj_orders_raw snapshots (sell side).
 CJ_FILL_WINDOW_DAYS = 7
 CJ_MAX_PAIR_GAP_HOURS = 30          # snapshot pairs further apart are ignored (too blind)
-CJ_MIN_COVERAGE_HOURS = 12          # less observed time than this -> fall back to Delve
+CJ_MIN_COVERAGE_HOURS = 12          # less observed time than this -> fall back to region history
 # Orders that vanish between two snapshots (not expired): sold out OR cancelled — we
 # can't tell. Counted at this share. STARTER GUESS; hourly snapshots make it matter less.
 CJ_DISAPPEARED_FILL_SHARE = 0.7
-# Fallback: Delve region 14d avg daily volume x this share. Delve includes 1DQ1-A, which
-# is bigger than C-J, so the share is well below 1. STARTER GUESS — calibrate against the
-# snapshot estimate once a week of snapshots exists (dashboard shows both side by side).
-CJ_DELVE_SHARE = 0.3
+# Fallback: 14d avg daily volume of C-J6MT's REGION (Insmother — NOT Delve; the first
+# version wrongly used Delve, fixed 2026-10-12) x this share. The region is resolved by the
+# job and stored in cj_runs.region_id. Whether ESI region history even includes trades in
+# private Keepstars is unverified — compare the "Region/den" column with the snapshot
+# estimate before trusting it. STARTER GUESS.
+CJ_REGION_NAME = "Insmother"        # display only
+CJ_REGION_SHARE = 0.8
 
 # Variant A (buy now from sell orders) also walks Perimeter sells, not only Jita system.
 CJ_INCLUDE_PERIMETER_SELLS = True

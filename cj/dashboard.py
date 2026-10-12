@@ -105,7 +105,9 @@ def render(res: CjResult, open_browser: bool = True):
         ("margin_b", "Marže B", _pct, True),
         ("demand_day", "Prodej C-J/den", lambda v: _num(v, "{:,.1f}"), True),
         ("demand_src", "Zdroj", _esc, False),
-        ("delve_day", "Delve/den", lambda v: _num(v, "{:,.1f}"), True),
+        ("fills_partial", "Část. prodeje ks", _num, True),
+        ("fills_vanished", "Zmizelé ks", _num, True),
+        ("delve_day", f"{config.CJ_REGION_NAME}/den", lambda v: _num(v, "{:,.1f}"), True),
         ("cj_sell_volume", "C-J nabídka ks", _num, True),
         ("competitor_days", "Nabídka dní", lambda v: _num(v, "{:,.1f}"), True),
         ("my_cj_stock", "Moje v C-J", _num, True),
@@ -116,19 +118,20 @@ def render(res: CjResult, open_browser: bool = True):
     ]
     instant_cols = [
         ("name", "Modul", _esc, False), ("units", "Ks", _num, True),
-        ("jita_avg", "Jita nákup", _isk, True), ("ship_unit", "Doprava/ks", _isk, True),
-        ("cj_buy_max", "C-J buy order", _isk, True), ("margin_pct", "Marže", _pct, True),
-        ("profit_total", "Zisk celkem", _isk, True), ("m3", "m³", _num, True),
+        ("jita_avg", "Jita nákup (průměr)", _isk, True), ("ship_unit", "Doprava/ks", _isk, True),
+        ("cj_buy_max", "C-J buy max", _isk, True), ("cj_buy_worst", "Nejnižší vzatý", _isk, True),
+        ("margin_pct", "Marže", _pct, True), ("profit_total", "Zisk celkem", _isk, True),
+        ("m3", "m³", _num, True),
     ]
     gap_cols = [
-        ("name", "Modul", _esc, False), ("delve_daily", "Delve/den", lambda v: _num(v, "{:,.1f}"), True),
+        ("name", "Modul", _esc, False), ("delve_daily", f"{config.CJ_REGION_NAME}/den", lambda v: _num(v, "{:,.1f}"), True),
         ("jita_sell_min", "Jita sell min", _isk, True), ("ship_unit", "Doprava/ks", _isk, True),
         ("min_cj_price", "Min. cena v C-J", _isk, True), ("cj_buy_max", "C-J buy order", _isk, True),
     ]
 
     multibuy = "\n".join(f"{r['name']}\t{int(r['qty'])}" for r in buy.to_dict("records")) if not buy.empty else ""
     rejected = ", ".join(f"{k}: {v}" for k, v in res.rejected_counts.items() if v) or "—"
-    run_at = res.run["run_at"]
+    run_at = res.snapshot_at if res.snapshot_at is not None else res.run["run_at"]
     perim = res.perimeter_scan_at if res.perimeter_scan_at is not None else "—"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -136,7 +139,7 @@ def render(res: CjResult, open_browser: bool = True):
 <html lang="cs"><head><meta charset="utf-8"><title>C-J import — {now}</title><style>{CSS}</style></head>
 <body>
 <h1>C-J6MT import — co zavézt z Jity</h1>
-<div class="subtitle">Report {now} · C-J snapshot {run_at} · Jita scan {res.run.get('jita_reused_scan_at') or 'vlastní (cj job)'} · Perimeter {perim}</div>
+<div class="subtitle">Report {now} · C-J snapshot {run_at} · Jita (plný běh {res.run['run_at']}) {res.run.get('jita_reused_scan_at') or 'vlastní scan'} · Perimeter {perim}</div>
 {warn_html}
 <div class="headline">{cards_html}</div>
 
@@ -151,9 +154,10 @@ doprava = packaged m³ × {_num(config.CJ_SHIPPING_ISK_PER_M3 or 0)} ISK · mno�
 <textarea readonly onclick="this.select()">{html.escape(multibuy)}</textarea>
 
 <h2>C-J buy ordery nad cenou z Jity (prodej rovnou do buy orderu, bez broker fee)</h2>
+<div class="note">Prochází se buy ordery od nejvyšší ceny; order se bere, jen když i jeho marginální kusy z Jity (průchod knihou) mají marži ≥ {config.CJ_MIN_MARGIN_PCT:g} %. Buy order se může mezitím vyplnit/zrušit — ověř těsně před nákupem.</div>
 {_table(res.instant, instant_cols, "Nic.")}
 
-<h2>Díry v C-J — žádný sell order, ale poptávka v Delve</h2>
+<h2>Díry v C-J — žádný sell order, ale poptávka v regionu ({config.CJ_REGION_NAME})</h2>
 <div class="note">Bez C-J dat o prodejích — jen tip na ruční ověření. Min. cena = cena, při které vychází cílová marže {config.CJ_MIN_MARGIN_PCT:g} %.</div>
 {_table(res.gaps, gap_cols, "Nic.")}
 </body></html>"""

@@ -14,7 +14,7 @@ Output: `output/cj_YYYYMMDD_HHMM.html`, including a Jita multibuy list ready to 
 
 | Part | What it does |
 |---|---|
-| `esi-jobs/job_cj.js` → Cloud Run Job `esi-cj-poller` | C-J order book (authenticated), `type_info` cache (m3, category), Jita books for types the main scan didn't cover, Delve 14-day history → BigQuery |
+| `esi-jobs/job_cj.js` → Cloud Run Job `esi-cj-poller` | C-J order book (authenticated), `type_info` cache (m3, category), Jita books for types the main scan didn't cover, Insmother 14-day history → BigQuery |
 | Cloud Run Job `esi-cj-snapshot` (optional, hourly) | C-J order book only. Makes the demand estimate more accurate |
 | `bigquery/schema_cj.sql` | `cj_orders_raw`, `type_info`, `cj_jita_orders_raw`, `cj_delve_history`, `cj_runs` |
 | `cj/analysis.py` | All the calculations (pure functions are tested in `tests/test_cj.py`) |
@@ -52,8 +52,9 @@ Output: `output/cj_YYYYMMDD_HHMM.html`, including a Jita multibuy list ready to 
     because there is no way to tell whether it sold out or was cancelled.
 
   If there are fewer than `CJ_MIN_COVERAGE_HOURS` of snapshots, the fallback is
-  Delve 14d volume × `CJ_DELVE_SHARE`. Delve also includes 1DQ1-A, which is why the share is
-  well below 1. The report shows both numbers side by side, so the share can be calibrated
+  14d volume of C-J6MT's region (Insmother; resolved by the job from the system name) ×
+  `CJ_REGION_SHARE`. Whether ESI region history includes trades in private Keepstars is not
+  verified. The report shows both numbers side by side, so the share can be calibrated
   after about a week.
 - **Quantity** = demand × `CJ_STOCK_DAYS` − my open sell stock in C-J, capped by:
   - Jita availability;
@@ -68,7 +69,7 @@ Extra sections in the report:
 
 - C-J buy orders that already pay more than the landed Jita price (sell straight into the
   buy order, no broker fee);
-- "gaps", i.e. modules with no sell order in C-J but with demand in Delve.
+- "gaps", i.e. modules with no sell order in C-J but with demand in Insmother.
 
 ## Known limitations
 
